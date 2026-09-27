@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>英雄音乐台</title><link rel="stylesheet" href="style.css"/></head>
+<body>
+<header id="titlebar">
+  <div class="tb-title"><img src="icon.png" alt=""/><span>英雄音乐台</span></div>
+  <span id="lcuBadge" class="badge muted">正在检测客户端…</span>
+  <div class="tb-controls">
+    <button id="winMinimize" title="最小化">&#x2500;</button>
+    <button id="winMaximize" title="最大化 / 还原">&#x25A1;</button>
+    <button id="winClose" class="tb-close" title="关闭">&#x2715;</button>
+  </div>
+</header>
+<main>
+  <section class="card detected">
+    <div class="detected-head">
+      <div><label>当前英雄</label><strong id="currentChampion">尚未检测到</strong></div>
+      <small id="championHint">正在等待客户端检测…</small>
+    </div>
+    <div class="row"><input id="manualChampionSearch" type="search" placeholder="搜索称号或昵称（如：亚索、狗头）" autocomplete="off"/><select id="manualChampion"><option value="">（自动检测）</option></select><button id="clearManualChampion">恢复自动</button></div>
+    <small id="manualHint" class="help">快捷键当前跟随自动检测。</small>
+  </section>
+  <section class="card"><h2>音乐映射</h2>
+    <div class="row"><input id="championSearch" type="search" placeholder="搜索称号或昵称，例如：亚索" autocomplete="off"/></div>
+    <div class="row"><select id="championInput"><option value="">正在从客户端读取英雄列表…</option></select><button id="useDetected">使用当前英雄</button><button id="refreshChampions">刷新列表</button></div>
+    <div class="row"><strong class="slot-key" id="slotKey1">Ctrl+1</strong><input id="trackLabel1" readonly placeholder="未设置第 1 条音乐"/><button id="chooseTrack1">导入</button><button id="playPreview1">试听</button><button id="clearTrack1" class="danger">清空</button></div>
+    <div class="row"><strong class="slot-key" id="slotKey2">Ctrl+2</strong><input id="trackLabel2" readonly placeholder="未设置第 2 条音乐"/><button id="chooseTrack2">导入</button><button id="playPreview2">试听</button><button id="clearTrack2" class="danger">清空</button></div>
+    <div class="row"><strong class="slot-key" id="slotKey3">Ctrl+3</strong><input id="trackLabel3" readonly placeholder="未设置第 3 条音乐"/><button id="chooseTrack3">导入</button><button id="playPreview3">试听</button><button id="clearTrack3" class="danger">清空</button></div>
+    <div class="row"><button id="saveMapping" class="primary">保存三条映射</button><button id="removeMapping" class="danger">移除该英雄全部映射</button></div>
+    <p id="mappingInfo" class="help"></p>
+  </section>
+  <section class="card"><h2>播放设置</h2>
+    <div class="grid2">
+      <div class="row"><label>播放键 1</label><input id="hotkey0" readonly/><button id="editHotkey0">修改</button></div>
+      <div class="row"><label>播放键 2</label><input id="hotkey1" readonly/><button id="editHotkey1">修改</button></div>
+      <div class="row"><label>播放键 3</label><input id="hotkey2" readonly/><button id="editHotkey2">修改</button></div>
+      <div class="row"><label>暂停/继续</label><input id="hotkeyPause" readonly/><button id="editHotkeyPause">修改</button></div>
+    </div>
+    <div class="row" id="captureBar" hidden><span id="captureHint" class="help">请按下新的快捷键…</span><button id="captureConfirm" class="primary" disabled>确认保存</button><button id="captureCancel">取消</button></div>
+    <p class="help">点击“修改”后按下想要的组合键（Ctrl 或 Shift，可叠加字母、数字、F1~F24），确认后立即生效；不支持 Alt。</p>
+    <div class="row"><label for="outputDevice">发送到 QQ</label><select id="outputDevice"><option value="">系统默认输出</option></select><button id="useVoicemeeter">使用 Voicemeeter</button></div>
+    <div class="row"><label for="monitorDevice">自己监听</label><select id="monitorDevice"><option value="">系统默认耳机</option></select><button id="refreshDevices">刷新设备</button></div>
+    <div class="row"><label for="musicVolume">音乐音量</label><input id="musicVolume" type="range" min="10" max="70" step="1"/><output id="musicVolumeValue">40%</output></div>
+    <div class="row"><label for="calibrationInput">说话参考</label><select id="calibrationInput"><option value="">自动选择 Voicemeeter B1</option></select><button id="calibrateVolume">麦克风和音乐校准</button></div>
+    <p id="calibrationHint" class="help">点击后用平常通话音量连续说话 5 秒；会一次性固定麦克风增益和音乐音量，只计算响度，不录音、不保存语音。</p>
+    <label class="toggle-row"><input id="weakNetworkMode" type="checkbox"/><span><strong>QQ 弱网模式</strong><small>只优化送入 B1 的音乐：单声道、语音友好频段和轻度动态压缩。耳机监听保持原音。</small></span></label>
+    <label class="toggle-row"><input id="loudnessStabilizer" type="checkbox"/><span><strong>响度稳定器</strong><small>与弱网模式互斥（开启其一时另一个置灰停用）：压缩动态并抬高安静段，对抗 QQ 语音的静音判定和降噪误伤；不削频段、保留立体声。</small></span></label>
+    <p class="help">音乐以 <span id="volumeSummary">40%</span> 音量同时发送到 Voicemeeter B1 和物理耳机；耳机监听不经过 A 通道，因此不会回听麦克风。</p>
+    <p class="help" id="playbackHelp">播放中再按相同播放键或暂停键，都会暂停并从原进度继续。</p>
+  </section>
+  <section class="card slim">
+    <div class="row"><strong class="card-inline-title">客户端连接</strong><span id="lockfileInfo" class="help"></span><button id="chooseLockfile">手动选择 lockfile</button></div>
+  </section>
+  <p id="notice" role="status"></p>
+</main>
+<div id="setupWizard" class="wizard-backdrop" hidden>
+  <div class="wizard">
+    <h2>初次配置向导</h2>
+    <ol class="wizard-steps">
+      <li>
+        <strong>① 安装 Voicemeeter（虚拟声卡，免费）</strong>
+        <p id="vmStatusText" class="help">正在检测 Voicemeeter…</p>
+        <div class="row"><button id="vmDownload" class="primary">从官网下载并安装</button><span id="vmDownloadHint" class="help"></span></div>
+        <p class="help">安装包直接从 VB-Audio 官方网站下载（约 15MB），安装时一路下一步即可。装好后点下方按钮重新检测。</p>
+        <button id="vmInstalled" hidden>我已安装完成，重新检测</button>
+      </li>
+      <li>
+        <strong>② 选择你的耳机和麦克风</strong>
+        <div class="row"><label>耳机（输出/监听）</label><select id="wizardHeadphone"><option value="">请选择</option></select></div>
+        <div class="row"><label>麦克风（输入）</label><select id="wizardMicrophone"><option value="">请选择</option></select></div>
+        <p class="help">下拉列表读取系统设备名；之后可编辑 settings.json 里的 headphoneDeviceName / microphoneDeviceName 更改。</p>
+      </li>
+      <li>
+        <strong>③ 一键配置</strong>
+        <p class="help">将设置系统默认播放/录音设备、写入 Voicemeeter 路由（麦克风与音乐→B1、麦克风增益 +12dB）、创建管理员桌面快捷方式。请始终从桌面快捷方式启动本应用。</p>
+        <button id="wizardFinish" class="primary">完成配置并进入</button>
+        <p id="wizardResult" class="help"></p>
+      </li>
+    </ol>
+  </div>
+</div>
+<div id="closeModal" class="modal-backdrop" hidden>
+  <div class="modal">
+    <button id="closeCancelX" class="modal-x" title="取消（Esc）">&#x2715;</button>
+    <h3>关闭英雄音乐台</h3>
+    <p class="help">最小化到托盘：快捷键、英雄检测和音频辅助继续运行，适合游戏期间。<br/>直接退出：停止以上全部功能并移除托盘图标。</p>
+    <div class="modal-actions">
+      <button id="closeToTray" class="primary">最小化到托盘</button>
+      <button id="closeExit" class="danger">直接退出</button>
+    </div>
+    <label class="toggle-row"><input id="closeRemember" type="checkbox"/><span><small>记住此选项，不再询问</small></span></label>
+  </div>
+</div>
+<audio id="player"></audio><audio id="qqOutputPlayer"></audio><audio id="monitorPlayer"></audio><audio id="previewPlayer"></audio><script src="champion-aliases.js"></script><script src="app.js"></script></body></html>

@@ -1,0 +1,7 @@
+node_modules/
+.downloads/
+scripts/*.exe
+release/
+*.log
+*.tmp
+HANDOFF.md

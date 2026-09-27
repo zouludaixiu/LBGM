@@ -1,0 +1,57 @@
+{
+  "name": "champion-soundboard",
+  "version": "1.0.0",
+  "description": "LBGM - League of Legends champion music soundboard (local only)",
+  "main": "main.js",
+  "author": "LBGM contributors",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1",
+    "dist": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "^39.2.7",
+    "electron-builder": "^26.15.3"
+  },
+  "allowScripts": {
+    "electron@39.8.10": true
+  },
+  "build": {
+    "appId": "com.lbgm.soundboard",
+    "productName": "LBGM",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**"
+    ],
+    "asarUnpack": [
+      "renderer/icon.png"
+    ],
+    "extraResources": [
+      "scripts/configure-audio.ps1",
+      "scripts/ensure-shortcut.ps1",
+      "scripts/PersistentAudio.cs",
+      "scripts/GameHotkeyStateHelperV2.exe",
+      "scripts/AudioRouteWatchdog.exe"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "renderer/app.ico",
+      "requestedExecutionLevel": "highestAvailable"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": false,
+      "artifactName": "LBGM-Setup-${version}.${ext}"
+    }
+  }
+}
