@@ -4,6 +4,12 @@
 
 当前版本：**v1.1.0** · Windows 10/11 x64 · [下载安装包](https://github.com/zouludaixiu/LBGM/releases/latest) · [详细使用说明](docs/V1.1.md)
 
+## 可选配套音乐
+
+作者个人整理的 **33 段 MP3** 已作为独立资源包提供：[下载音乐资源包](https://github.com/zouludaixiu/LBGM/releases/download/v1.1.0/LBGM-Music-Pack-1.1.0.zip)。解压后可导入公共池或英雄专属槽位，不会覆盖已有映射。
+
+本次整理与分享未进行商业用途，供非商业个人体验使用。音频权利归各自权利人所有，不适用项目代码的 MIT 许可；个人整理和非商业说明不等同于版权授权。详见 [资源内容、导入方法与权利说明](docs/RESOURCE-PACK.md)。
+
 ## 功能
 
 ### 英雄识别与音乐匹配
