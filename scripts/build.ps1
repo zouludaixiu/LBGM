@@ -21,19 +21,20 @@ $helperOut = Join-Path $PSScriptRoot 'GameHotkeyStateHelperV2.exe'
 & $csc /nologo /optimize+ /platform:x64 /target:winexe /out:"$helperOut" "$helperSrc"
 if ($LASTEXITCODE -ne 0) { throw 'GameHotkeyStateHelperV2.exe compilation failed.' }
 
-# Compile the watchdog to .new.exe: the running copy cannot be replaced in
-# place. deploy-audio-fix.ps1 stops the app, swaps the file and restarts.
+# The running-app check above prevents replacing a locked helper.
 $watchdogSrc = Join-Path $PSScriptRoot 'AudioRouteWatchdog.cs'
-$watchdogOut = Join-Path $PSScriptRoot 'AudioRouteWatchdog.new.exe'
+$watchdogOut = Join-Path $PSScriptRoot 'AudioRouteWatchdog.exe'
 & $csc /nologo /optimize+ /platform:x64 /target:winexe /out:"$watchdogOut" "$watchdogSrc"
 if ($LASTEXITCODE -ne 0) { throw 'AudioRouteWatchdog compilation failed.' }
 
 node --check (Join-Path $root 'main.js')
+if ($LASTEXITCODE -ne 0) { throw 'main.js syntax check failed.' }
 node --check (Join-Path $root 'renderer\app.js')
+if ($LASTEXITCODE -ne 0) { throw 'renderer/app.js syntax check failed.' }
 
 [pscustomobject]@{
   ok = $true
   hotkeyHelper = $helperOut
   watchdog = $watchdogOut
-  note = 'Run scripts\deploy-audio-fix.ps1 to swap in AudioRouteWatchdog.new.exe and restart the app.'
+  note = 'Both helpers are ready for packaging.'
 } | ConvertTo-Json -Compress

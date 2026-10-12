@@ -5,6 +5,7 @@ const https = require('https');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const { execFile, spawn } = require('child_process');
+const MusicModel = require('./renderer/music-model');
 
 // Playback is intentionally initiated by a trusted local global hotkey rather
 // than a click inside the renderer, so do not let Chromium's autoplay policy
@@ -22,9 +23,8 @@ if (!hasSingleInstanceLock) app.quit();
 let win;
 let tray;
 const DEFAULT_PLAY_HOTKEYS = ['Ctrl+1', 'Ctrl+2', 'Ctrl+3'];
-// Settings written by older builds pinned Shift+1/2/3; move them to the new
-// defaults exactly once, then respect whatever the user saved afterwards.
-const LEGACY_PLAY_HOTKEYS = ['Shift+1', 'Shift+2', 'Shift+3'];
+const RESTART_HOTKEY = 'Ctrl+4';
+// V1.1 preserves existing bindings, including the original Shift+1/2/3.
 // One Ctrl/Shift modifier (or both) plus a letter, digit or F1~F24. Alt is not
 // offered because the native game helper cannot read it.
 const HOTKEY_PATTERN = /^(?:(?:Ctrl\+Shift|Shift\+Ctrl|Ctrl|Shift)\+)(?:[A-Z0-9]|F(?:[1-9]|1\d|2[0-4]))$/;
@@ -36,7 +36,7 @@ const DEFAULT_MIC_GAIN_DB = 12;
 const DEFAULT_HEADPHONE_NAME = '';
 const DEFAULT_MICROPHONE_NAME = '';
 const DEFAULT_VOICEMEETER_DIR = 'C:\\Program Files (x86)\\VB\\Voicemeeter';
-let config = { playHotkeys: [...DEFAULT_PLAY_HOTKEYS], pauseHotkey: 'Ctrl+A', musicVolume: DEFAULT_MUSIC_VOLUME, micGainDb: DEFAULT_MIC_GAIN_DB, weakNetworkMode: true, loudnessStabilizer: false, calibrationInputDeviceId: '', mappings: {}, lockfilePath: '', outputDeviceId: '', monitorDeviceId: '', headphoneDeviceName: DEFAULT_HEADPHONE_NAME, microphoneDeviceName: DEFAULT_MICROPHONE_NAME, voicemeeterDir: DEFAULT_VOICEMEETER_DIR, manualChampion: '', closeAction: '', setupDone: false };
+let config = MusicModel.migrate({ playHotkeys: [...DEFAULT_PLAY_HOTKEYS], pauseHotkey: 'Ctrl+A', musicVolume: DEFAULT_MUSIC_VOLUME, micGainDb: DEFAULT_MIC_GAIN_DB, weakNetworkMode: true, loudnessStabilizer: false, calibrationInputDeviceId: '', mappings: {}, lockfilePath: '', outputDeviceId: '', monitorDeviceId: '', headphoneDeviceName: DEFAULT_HEADPHONE_NAME, microphoneDeviceName: DEFAULT_MICROPHONE_NAME, voicemeeterDir: DEFAULT_VOICEMEETER_DIR, manualChampion: '', closeAction: '', setupDone: false });
 let lcuTimer;
 let lcuPollInFlight = false;
 let lastProcessLockCheckAt = 0;
@@ -48,6 +48,7 @@ let lastHotkeyEventId = null;
 let quitting = false;
 let lastPlayTriggerAt = 0;
 let lastPauseTriggerAt = 0;
+let lastRestartTriggerAt = 0;
 let hotkeyCapture = null;
 let closeConfirmInFlight = false;
 let audioConfigInFlight = null;
@@ -79,6 +80,7 @@ function validateHotkeys(playHotkeys, pauseHotkey) {
     return { ok: false, error: '暂停键必须是 Ctrl 或 Shift（可叠加）加字母、数字或 F1~F24。' };
   }
   const combined = [...accelerators, String(pauseHotkey)].map(value => value.toUpperCase());
+  if (combined.includes(RESTART_HOTKEY.toUpperCase())) return { ok: false, error: 'Ctrl+4 已保留用于从头播放当前 BGM。' };
   if (new Set(combined).size !== combined.length) return { ok: false, error: '四个快捷键之间不能重复。' };
   return { ok: true, playHotkeys: accelerators, pauseHotkey: String(pauseHotkey) };
 }
@@ -86,13 +88,13 @@ async function loadConfig() {
   let migrated = false;
   try {
     const stored = JSON.parse(await fsp.readFile(configPath(), 'utf8'));
+    // Preserve the original user library before introducing V1.1 fields.
+    const backupPath = path.join(app.getPath('userData'), 'settings.before-v1.1.json');
+    if (!fs.existsSync(backupPath)) await fsp.copyFile(configPath(), backupPath);
     config = { ...config, ...stored, playHotkeys: DEFAULT_PLAY_HOTKEYS };
     if ('hotkey' in config) { delete config.hotkey; migrated = true; }
     const storedPlay = Array.isArray(stored.playHotkeys) ? stored.playHotkeys.map(value => String(value ?? '')) : null;
-    if (storedPlay && storedPlay.join('|') === LEGACY_PLAY_HOTKEYS.join('|')) {
-      config.playHotkeys = [...DEFAULT_PLAY_HOTKEYS];
-      migrated = true;
-    } else if (storedPlay && storedPlay.length === 3 && storedPlay.every(value => HOTKEY_PATTERN.test(value))) {
+    if (storedPlay && storedPlay.length === 3 && storedPlay.every(value => HOTKEY_PATTERN.test(value))) {
       config.playHotkeys = storedPlay;
     }
     if (!HOTKEY_PATTERN.test(String(config.pauseHotkey ?? ''))) { config.pauseHotkey = 'Ctrl+A'; migrated = true; }
@@ -100,11 +102,24 @@ async function loadConfig() {
     // 手动指定英雄仅本次运行有效：每次启动都恢复自动检测，
     // 避免上次的手动选择悄悄影响之后的对局。
     config.manualChampion = '';
+    for (const field of ['headphoneDeviceName', 'microphoneDeviceName']) {
+      const name = MusicModel.deviceName(config[field]);
+      if (name !== config[field]) { config[field] = name; migrated = true; }
+    }
     if (new Set([...config.playHotkeys, config.pauseHotkey].map(value => value.toUpperCase())).size !== 4) {
       config.playHotkeys = [...DEFAULT_PLAY_HOTKEYS];
       config.pauseHotkey = 'Ctrl+A';
       migrated = true;
     }
+    // A pre-V1.1 custom Ctrl+4 binding must not fire both play and restart.
+    const bindings = [...config.playHotkeys, config.pauseHotkey];
+    for (let index = 0; index < bindings.length; index++) {
+      if (bindings[index].toUpperCase() !== RESTART_HOTKEY.toUpperCase()) continue;
+      bindings[index] = Array.from({ length: 24 }, (_, i) => `Ctrl+F${i + 1}`).find(candidate => !bindings.some(value => value.toUpperCase() === candidate.toUpperCase()));
+      migrated = true;
+    }
+    config.playHotkeys = bindings.slice(0, 3);
+    config.pauseHotkey = bindings[3];
     const mappings = {};
     for (const [champion, value] of Object.entries(config.mappings || {})) {
       if (Array.isArray(value)) {
@@ -116,6 +131,9 @@ async function loadConfig() {
       }
     }
     config.mappings = mappings;
+    config.monitorVolume = Number.isFinite(stored.monitorVolume) ? stored.monitorVolume : (Number.isFinite(stored.musicVolume) ? stored.musicVolume : DEFAULT_MUSIC_VOLUME);
+    config = MusicModel.migrate(config);
+    if (!Array.isArray(stored.publicTracks) || !Number.isFinite(stored.monitorVolume) || !Array.isArray(stored.recentChampions)) migrated = true;
     if (typeof stored.weakNetworkMode !== 'boolean') {
       config.weakNetworkMode = true;
       migrated = true;
@@ -139,14 +157,20 @@ async function loadConfig() {
     if (migrated) await saveConfig();
   } catch { /* first run */ }
 }
-async function saveConfig() {
-  await fsp.mkdir(path.dirname(configPath()), { recursive: true });
-  const temporary = `${configPath()}.tmp`;
-  await fsp.writeFile(temporary, JSON.stringify(config, null, 2), 'utf8');
-  await fsp.rename(temporary, configPath());
+let configWriteQueue = Promise.resolve();
+function saveConfig() {
+  const snapshot = JSON.stringify(config, null, 2);
+  const operation = configWriteQueue.catch(() => {}).then(async () => {
+    await fsp.mkdir(path.dirname(configPath()), { recursive: true });
+    const temporary = `${configPath()}.tmp`;
+    await fsp.writeFile(temporary, snapshot, 'utf8');
+    await fsp.rename(temporary, configPath());
+  });
+  configWriteQueue = operation;
+  return operation;
 }
 function serializableConfig() {
-  return { ...config, testTrackUrl: pathToFileURL(ensureTestTrack()).href };
+  return { ...MusicModel.migrate(config), testTrackUrl: pathToFileURL(ensureTestTrack()).href };
 }
 
 function runAudioConfig() {
@@ -157,12 +181,12 @@ function runAudioConfig() {
       '-Headphones', String(config.headphoneDeviceName ?? DEFAULT_HEADPHONE_NAME),
       '-Microphone', String(config.microphoneDeviceName ?? DEFAULT_MICROPHONE_NAME),
       '-VoicemeeterDir', String(config.voicemeeterDir ?? DEFAULT_VOICEMEETER_DIR)],
-      { windowsHide: true, timeout: 20000, maxBuffer: 1024 * 128 }, (error, stdout, stderr) => {
+      { windowsHide: true, timeout: 35000, maxBuffer: 1024 * 128 }, (error, stdout, stderr) => {
         const status = {
           ok: !error,
           checkedAt: new Date().toISOString(),
           output: stdout.trim(),
-          error: error ? (stderr.trim() || error.message) : ''
+          error: error ? (error.killed ? '音频配置超过 35 秒，请检查设备连接后重试。' : (stderr.trim() || error.message)) : ''
         };
         try { fs.writeFileSync(path.join(app.getPath('userData'), 'audio-config-status.json'), JSON.stringify(status, null, 2)); } catch { /* diagnostics only */ }
         resolve(status);
@@ -200,9 +224,10 @@ function startAudioRouteWatchdog() {
   const helper = path.join(scriptsDir(), 'AudioRouteWatchdog.exe');
   if (!fs.existsSync(helper)) return false;
   const watchdogStatus = path.join(app.getPath('userData'), 'audio-watchdog-status.json');
-  audioRouteWatchdog = spawn(helper, [String(process.pid), String(config.micGainDb ?? DEFAULT_MIC_GAIN_DB), watchdogStatus], { windowsHide: true, stdio: 'ignore' });
-  audioRouteWatchdog.on('error', () => { audioRouteWatchdog = null; });
-  audioRouteWatchdog.on('exit', () => { audioRouteWatchdog = null; });
+  const child = spawn(helper, [String(process.pid), String(config.micGainDb ?? DEFAULT_MIC_GAIN_DB), watchdogStatus], { windowsHide: true, stdio: 'ignore' });
+  audioRouteWatchdog = child;
+  child.on('error', () => { if (audioRouteWatchdog === child) audioRouteWatchdog = null; });
+  child.on('exit', () => { if (audioRouteWatchdog === child) audioRouteWatchdog = null; });
   return true;
 }
 
@@ -288,15 +313,22 @@ function recordShortcutStatus(accelerator, result) {
     fs.writeFileSync(path.join(app.getPath('userData'), 'shortcut-status.json'), JSON.stringify({ accelerator, ...result, checkedAt: new Date().toISOString() }, null, 2));
   } catch { /* diagnostics must never affect playback */ }
 }
+function triggerRestart() {
+  if (hotkeyCapture || Date.now() - lastRestartTriggerAt < 250) return;
+  lastRestartTriggerAt = Date.now();
+  emit('restart-playback');
+}
 function setShortcuts(playAccelerators, pauseAccelerator) {
   globalShortcut.unregisterAll();
   const accelerators = Array.isArray(playAccelerators) ? playAccelerators : DEFAULT_PLAY_HOTKEYS;
   const helperActive = Boolean(hotkeyHelper && hotkeyHelper.exitCode === null);
   const playResults = accelerators.map((accelerator, slot) => globalShortcut.register(accelerator, () => triggerPlayback(slot, accelerator)));
   const pauseOk = pauseAccelerator && globalShortcut.register(pauseAccelerator, triggerPause);
+  const restartOk = globalShortcut.register(RESTART_HOTKEY, triggerRestart);
   const failed = [];
   playResults.forEach((ok, slot) => { if (!ok && !helperActive) failed.push(`播放键 ${accelerators[slot]}`); });
   if (!pauseOk && !helperActive) failed.push(`暂停键 ${pauseAccelerator}`);
+  if (!restartOk && !helperActive) failed.push(`重播键 ${RESTART_HOTKEY}`);
   const result = failed.length === 0
     ? { ok: true, playOk: playResults.map(ok => ok || helperActive), pauseOk: Boolean(pauseOk) || helperActive, mode: helperActive ? 'elevated-key-state+global-fallback' : 'global-shortcut' }
     : { ok: false, playOk: playResults, pauseOk: Boolean(pauseOk), mode: 'global-shortcut', error: `${failed.join('、')} 无效或已被其他程序占用。` };
@@ -317,12 +349,15 @@ function startGameHotkeyHelper(playAccelerators, pauseAccelerator) {
   try { fs.rmSync(eventFile, { force: true }); } catch { /* stale event only */ }
   try { fs.rmSync(readyFile, { force: true }); } catch { /* stale diagnostic only */ }
   lastHotkeyEventId = null;
-  hotkeyHelper = spawn(helper, [String(process.pid), eventFile, readyFile, ...accelerators, pauseAccelerator], { windowsHide: true, stdio: 'ignore' });
-  hotkeyHelper.on('error', () => {
+  const child = spawn(helper, [String(process.pid), eventFile, readyFile, ...accelerators, pauseAccelerator, RESTART_HOTKEY], { windowsHide: true, stdio: 'ignore' });
+  hotkeyHelper = child;
+  child.on('error', () => {
+    if (hotkeyHelper !== child) return;
     hotkeyHelper = null;
     if (!quitting) setShortcuts(config.playHotkeys, config.pauseHotkey);
   });
-  hotkeyHelper.on('exit', () => {
+  child.on('exit', () => {
+    if (hotkeyHelper !== child) return;
     hotkeyHelper = null;
     if (!quitting) setShortcuts(config.playHotkeys, config.pauseHotkey);
   });
@@ -339,6 +374,7 @@ function startGameHotkeyHelper(playAccelerators, pauseAccelerator) {
         triggerPlayback(slot, accelerators[slot]);
       }
       else if (event.type === 'pause') triggerPause();
+      else if (event.type === 'restart') triggerRestart();
     } catch { /* no new complete event */ }
   }, 60);
   return true;
@@ -631,6 +667,8 @@ async function pollChampion() {
           : '已检测到客户端进程，但读取连接信息失败，稍后重试'
       });
     } else {
+      lastChampion = null;
+      emitChampion(null);
       emitLcuStatus({ connected: false, text: '未检测到运行中的英雄联盟客户端' });
     }
     return;
@@ -642,7 +680,7 @@ async function pollChampion() {
       // Pre-pick is reported as championPickIntent. A lock is recorded on the
       // matching "pick" action, not reliably on the myTeam member itself.
       const championId = me?.championId || me?.championPickIntent;
-      if (!me || !championId) { emitLcuStatus({ connected: true, text: '客户端已连接，等待选择英雄' }); return; }
+      if (!me || !championId) { lastChampion = null; emitChampion(null); emitLcuStatus({ connected: true, text: '客户端已连接，等待选择英雄' }); return; }
       // Id→name lookup comes from the in-memory cache; a poll tick must not
       // refetch the full champion list from the LCU every second.
       const champions = await getChampionList();
@@ -672,6 +710,12 @@ async function pollChampion() {
     emitLcuStatus({ connected: true, text: `游戏中：${lastChampion.name}` });
     return;
   }
+  // Only a known non-game phase clears the previous hero; transient endpoint
+  // failures during loading must not switch the user's track source.
+  if (lastChampion) try {
+    const phase = await lcuGet(locks[0], '/lol-gameflow/v1/gameflow-phase');
+    if (!['ChampSelect', 'InProgress', 'GameStart', 'Reconnect'].includes(phase)) { lastChampion = null; emitChampion(null); }
+  } catch { /* retain the last selection while disconnected */ }
   emitLcuStatus({ connected: false, text: '已检测到客户端，等待英雄选择界面' });
 }
 
@@ -703,7 +747,13 @@ function createTray() {
 }
 function createWindow() {
   win = new BrowserWindow({ width: 840, height: 720, minWidth: 680, minHeight: 600, frame: false, webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
-  win.loadFile('renderer/index.html');
+  win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  win.webContents.on('did-finish-load', async () => {
+    try {
+      const page = await win.webContents.executeJavaScript(`({url:location.href, title:document.title, libraryTitle:document.querySelector('#musicLibrary .fold-title')?.textContent, hasManualToggle:!!document.getElementById('manualToggle'), hasDailySlots:!!document.getElementById('dailySlots'), hasEndSlider:!!document.getElementById('segmentEndRange'), hasStyledConfirm:!!document.getElementById('confirmModal')})`);
+      fs.writeFileSync(path.join(app.getPath('userData'), 'renderer-loaded-status.json'), JSON.stringify({ version: app.getVersion(), sourceRoot: __dirname, loadedAt: new Date().toISOString(), ...page }, null, 2));
+    } catch { /* diagnostics must not affect the window */ }
+  });
   for (const evt of ['maximize', 'unmaximize']) win.on(evt, () => emit('maximize-state', win.isMaximized()));
   win.on('close', event => {
     if (quitting) return;
@@ -731,7 +781,12 @@ app.whenReady().then(async () => {
   // Heavy, side-effectful setup runs after the window is visible so launch does
   // not wait ~10s on Voicemeeter and PowerShell. Hotkeys and the LCU poll above
   // do not depend on it.
-  configureAudioRouting().then(() => startAudioRouteWatchdog());
+  if (config.setupDone && config.headphoneDeviceName && config.microphoneDeviceName) {
+    configureAudioRouting().then(result => {
+      if (result.ok) startAudioRouteWatchdog();
+      emit('audio-setup-status', result);
+    });
+  }
   ensureDesktopShortcut();
   getDdragonNicknames().catch(() => {}); // seed the automatic nickname table
   // Safety net: if the renderer dies mid-capture, restore global shortcuts.
@@ -751,6 +806,55 @@ ipcMain.handle('report-playback', (_event, status) => {
   return true;
 });
 ipcMain.handle('get-champions', () => getChampionList(true));
+const avatarRequests = new Map();
+function imageRequest(port, endpoint, password) {
+  return new Promise((resolve, reject) => {
+    const options = port ? { hostname: '127.0.0.1', port: Number(port), path: endpoint, rejectUnauthorized: false,
+      headers: { Authorization: `Basic ${Buffer.from(`riot:${password}`).toString('base64')}` } } : endpoint;
+    const req = https.get(options, res => {
+      if (res.statusCode !== 200 || !String(res.headers['content-type']).startsWith('image/')) { res.resume(); return reject(new Error('Avatar unavailable')); }
+      const parts = []; let size = 0;
+      res.on('data', chunk => { size += chunk.length; if (size > 2 * 1024 * 1024) req.destroy(new Error('Avatar too large')); else parts.push(chunk); });
+      res.on('error', reject);
+      res.on('end', () => resolve(Buffer.concat(parts)));
+    });
+    req.setTimeout(3500, () => req.destroy(new Error('Avatar request timed out')));
+    req.on('error', reject);
+  });
+}
+ipcMain.handle('get-champion-avatar', async (_event, requestedId) => {
+  const id = Number(requestedId);
+  if (!Number.isInteger(id) || id <= 0 || id >= 1000) return null;
+  if (avatarRequests.has(id)) return avatarRequests.get(id);
+  const request = (async () => {
+    const directory = path.join(app.getPath('userData'), 'champion-avatars');
+    const target = path.join(directory, `${id}.png`);
+    if (fs.existsSync(target)) return pathToFileURL(target).href;
+    let data;
+    for (const lock of await getLcuConnections()) {
+      try { data = await imageRequest(lock.port, `/lol-game-data/assets/v1/champion-icons/${id}.png`, lock.password); break; } catch { /* offline fallback */ }
+    }
+    if (!data) {
+      try {
+        const versions = await httpsJsonGet('https://ddragon.leagueoflegends.com/api/versions.json');
+        const champions = await getChampionList();
+        const champion = champions.find(item => item.id === id);
+        let alias = champion?.alias;
+        if (!alias || !/^[A-Za-z0-9]+$/.test(alias)) {
+          const names = await httpsJsonGet(`https://ddragon.leagueoflegends.com/cdn/${versions[0]}/data/zh_CN/champion.json`);
+          alias = Object.values(names.data || {}).find(item => Number(item.key) === id)?.id;
+        }
+        if (!alias || !/^[A-Za-z0-9]+$/.test(alias)) return null;
+        data = await imageRequest(null, `https://ddragon.leagueoflegends.com/cdn/${versions[0]}/img/champion/${alias}.png`);
+      } catch { return null; }
+    }
+    await fsp.mkdir(directory, { recursive: true });
+    await fsp.writeFile(target, data);
+    return pathToFileURL(target).href;
+  })();
+  avatarRequests.set(id, request);
+  try { return await request; } finally { avatarRequests.delete(id); }
+});
 ipcMain.handle('get-champion-nicknames', (_event, force) => getDdragonNicknames(Boolean(force)));
 ipcMain.handle('save-settings', async (_event, changes) => {
   const hotkeysChanged = Object.prototype.hasOwnProperty.call(changes, 'playHotkeys') || Object.prototype.hasOwnProperty.call(changes, 'pauseHotkey');
@@ -850,16 +954,19 @@ ipcMain.handle('wizard-vm-install', async () => {
   }
 });
 ipcMain.handle('wizard-complete', async (_event, payload) => {
-  const headphoneDeviceName = String(payload?.headphoneDeviceName || '').trim();
-  const microphoneDeviceName = String(payload?.microphoneDeviceName || '').trim();
+  const headphoneDeviceName = MusicModel.deviceName(payload?.headphoneDeviceName);
+  const microphoneDeviceName = MusicModel.deviceName(payload?.microphoneDeviceName);
   if (!headphoneDeviceName || !microphoneDeviceName) return { ok: false, error: '请先选择耳机和麦克风。' };
+  if (audioConfigInFlight) await audioConfigInFlight.catch(() => {});
   config.headphoneDeviceName = headphoneDeviceName;
   config.microphoneDeviceName = microphoneDeviceName;
-  config.setupDone = true;
-  await saveConfig();
-  if (audioConfigInFlight) await audioConfigInFlight.catch(() => {});
+  config.setupDone = false;
   const routing = await configureAudioRouting();
-  startAudioRouteWatchdog();
+  if (routing.ok) {
+    config.setupDone = true;
+    startAudioRouteWatchdog();
+  }
+  await saveConfig();
   return { ok: routing.ok, settings: serializableConfig(), error: routing.error || '' };
 });
 ipcMain.handle('apply-mic-gain', async (_event, requestedGainDb) => {
@@ -882,6 +989,7 @@ ipcMain.handle('read-mapped-audio', async (_event, filePath) => {
   const requested = path.resolve(String(filePath || ''));
   const mappedPaths = Object.values(config.mappings || {})
     .flatMap(value => Array.isArray(value) ? value : [value])
+    .concat(MusicModel.slots(config.publicTracks))
     .filter(Boolean)
     .map(track => path.resolve(String(track.path || '')));
   if (!mappedPaths.includes(requested)) throw new Error('Audio file is not part of a saved champion mapping.');

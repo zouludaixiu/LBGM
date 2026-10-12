@@ -1,7 +1,8 @@
 param(
   [string]$TargetPath = '',
   [string]$Arguments = '',
-  [string]$IconPath = ''
+  [string]$IconPath = '',
+  [string]$WorkingDirectory = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,8 +16,14 @@ $shortcutPath = Join-Path $desktop $shortcutName
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = $TargetPath
-if ($Arguments) { $shortcut.Arguments = $Arguments }
-$shortcut.WorkingDirectory = Split-Path -Parent $TargetPath
+$shortcut.Arguments = $Arguments
+if ($WorkingDirectory) {
+  $shortcut.WorkingDirectory = $WorkingDirectory
+} elseif ($Arguments -and (Test-Path -LiteralPath $Arguments.Trim('"') -PathType Container)) {
+  $shortcut.WorkingDirectory = $Arguments.Trim('"')
+} else {
+  $shortcut.WorkingDirectory = Split-Path -Parent $TargetPath
+}
 $shortcut.Description = 'League champion music soundboard'
 $shortcut.IconLocation = "$(if ($IconPath) { $IconPath } else { $TargetPath }),0"
 $shortcut.Save()

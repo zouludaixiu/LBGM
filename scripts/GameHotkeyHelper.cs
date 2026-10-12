@@ -19,7 +19,7 @@ internal static class GameHotkeyHelper
 
     private static int Main(string[] args)
     {
-        // parent PID, event file, ready file, slot 1, slot 2, slot 3, pause
+        // parent PID, event file, ready file, slot 1, slot 2, slot 3, pause, restart
         if (args.Length < 7) return 2;
         int parentPid;
         if (!int.TryParse(args[0], out parentPid)) return 3;
@@ -27,7 +27,8 @@ internal static class GameHotkeyHelper
         string readyFile = args[2];
         var play = new[] { ParseBinding(args[3]), ParseBinding(args[4]), ParseBinding(args[5]) };
         Binding pause = ParseBinding(args[6]);
-        if (pause == null || Array.Exists(play, item => item == null)) return 4;
+        Binding restart = ParseBinding(args.Length > 7 ? args[7] : "Ctrl+4");
+        if (pause == null || restart == null || Array.Exists(play, item => item == null)) return 4;
 
         Directory.CreateDirectory(Path.GetDirectoryName(eventFile));
         File.WriteAllText(readyFile, "ready");
@@ -44,6 +45,9 @@ internal static class GameHotkeyHelper
             bool pauseDown = IsBindingDown(pause);
             if (pauseDown && !pause.WasDown) WriteEvent(eventFile, "pause", -1);
             pause.WasDown = pauseDown;
+            bool restartDown = IsBindingDown(restart);
+            if (restartDown && !restart.WasDown) WriteEvent(eventFile, "restart", -1);
+            restart.WasDown = restartDown;
             Thread.Sleep(15);
         }
         return 0;

@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('soundboard', {
   getSettings: () => ipcRenderer.invoke('get-settings'),
   getChampions: () => ipcRenderer.invoke('get-champions'),
+  getChampionAvatar: id => ipcRenderer.invoke('get-champion-avatar', id),
   getChampionNicknames: force => ipcRenderer.invoke('get-champion-nicknames', Boolean(force)),
   saveSettings: changes => ipcRenderer.invoke('save-settings', changes),
   applyMicGain: gainDb => ipcRenderer.invoke('apply-mic-gain', gainDb),
@@ -22,6 +23,8 @@ contextBridge.exposeInMainWorld('soundboard', {
   onMaximizeState: callback => ipcRenderer.on('maximize-state', (_e, maximized) => callback(maximized)),
   onToggle: callback => ipcRenderer.on('toggle-playback', (_e, payload) => callback(payload)),
   onPause: callback => ipcRenderer.on('pause-playback', callback),
+  onRestart: callback => ipcRenderer.on('restart-playback', callback),
   onChampion: callback => ipcRenderer.on('champion-detected', (_e, champion) => callback(champion)),
-  onLcuStatus: callback => ipcRenderer.on('lcu-status', (_e, status) => callback(status))
+  onLcuStatus: callback => ipcRenderer.on('lcu-status', (_e, status) => callback(status)),
+  onAudioSetupStatus: callback => ipcRenderer.on('audio-setup-status', (_e, status) => callback(status))
 });

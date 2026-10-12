@@ -1,6 +1,6 @@
 {
   "name": "champion-soundboard",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "LBGM - League of Legends champion music soundboard (local only)",
   "main": "main.js",
   "author": "LBGM contributors",
@@ -8,6 +8,8 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
+    "test": "node --test tests/*.test.js",
+    "test:renderer": "electron tests/renderer-smoke.cjs",
     "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1",
     "dist": "electron-builder --win nsis"
   },

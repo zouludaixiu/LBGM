@@ -31,12 +31,14 @@ Add-Type -Path (Join-Path $PSScriptRoot 'PersistentAudio.cs')
 if (-not $Headphones -or -not $Microphone) {
   throw 'Device names are required. Pass -Headphones and -Microphone (they are chosen in the first-run wizard or stored in settings.json).'
 }
-$headphones = $Headphones
-$microphone = $Microphone
+$prefixPattern = '^(?:(?:Default|Communications)\s*[-:]+\s*)+'
+$headphones = ($Headphones -replace $prefixPattern, '').Trim()
+$microphone = ($Microphone -replace $prefixPattern, '').Trim()
 
-$headphonesDevice = Get-PnpDevice -PresentOnly -Class AudioEndpoint -ErrorAction Stop |
+$endpoints = Get-PnpDevice -PresentOnly -Class AudioEndpoint -ErrorAction Stop
+$headphonesDevice = $endpoints |
   Where-Object { $_.FriendlyName -eq $headphones } | Select-Object -First 1
-$microphoneDevice = Get-PnpDevice -PresentOnly -Class AudioEndpoint -ErrorAction Stop |
+$microphoneDevice = $endpoints |
   Where-Object { $_.FriendlyName -eq $microphone } | Select-Object -First 1
 if (-not $headphonesDevice -or -not $microphoneDevice) {
   throw "The configured playback or recording endpoint was not found: '$headphones' / '$microphone'. Check the device names."
@@ -96,6 +98,9 @@ try {
     $readResult = [LbgmPersistentAudio.Voicemeeter]::VBVMR_GetParameterFloat($name, [ref]$value)
     if ($readResult -ne 0) { throw "Voicemeeter parameter read failed: $name ($readResult)" }
     $verified[$name] = $value
+  }
+  if ([Math]::Abs($verified['Strip[0].Gain'] - $MicGainDb) -gt 0.1 -or $verified['Strip[0].A1'] -ne 0 -or $verified['Strip[0].B1'] -ne 1) {
+    throw 'The microphone gain or routing did not match the requested configuration.'
   }
 
   # Keep a restorable copy in addition to applying the settings on every app launch.

@@ -13,48 +13,66 @@
 <main>
   <section class="card detected">
     <div class="detected-head">
-      <div><label>当前英雄</label><strong id="currentChampion">尚未检测到</strong></div>
+      <div class="champion-identity"><div class="avatar-wrap"><img id="championAvatar" alt="英雄头像" hidden/><span id="avatarPlaceholder">♫</span></div><div><label>当前英雄</label><strong id="currentChampion">尚未检测到</strong><span id="championLibraryHint" class="help">公共音乐随时待命</span></div></div>
       <small id="championHint">正在等待客户端检测…</small>
     </div>
-    <div class="row"><input id="manualChampionSearch" type="search" placeholder="搜索称号或昵称（如：亚索、狗头）" autocomplete="off"/><select id="manualChampion"><option value="">（自动检测）</option></select><button id="clearManualChampion">恢复自动</button></div>
+    <div class="hero-actions"><span id="heroMode" class="mode-chip">自动检测</span><button id="manualToggle" aria-expanded="false" aria-controls="manualPanel">手动指定英雄 <span aria-hidden="true">⌄</span></button><button id="restoreAuto" hidden>恢复自动</button></div>
+    <div id="manualPanel" class="manual-panel" hidden><div class="row"><input id="manualChampionSearch" type="search" placeholder="搜索称号或昵称（如：亚索、狗头）" autocomplete="off"/><select id="manualChampion"><option value="">（自动检测）</option></select><button id="clearManualChampion">恢复自动</button></div></div>
     <small id="manualHint" class="help">快捷键当前跟随自动检测。</small>
+    <div class="row"><label for="playbackMode">播放来源</label><select id="playbackMode"><option value="auto">自动 · 专属优先，空槽使用公共池</option><option value="public">仅公共音乐池</option></select><button id="quickConfigure" hidden>为当前英雄添加音乐</button></div>
+    <div id="dailySlots" class="daily-slots" aria-label="当前可播放音乐"></div>
+    <section id="recentSection" class="recent-section" hidden><div class="section-caption"><strong>最近使用</strong><span>点击英雄，编辑专属音乐</span></div><div id="recentChampions" class="recent-list" aria-label="最近使用英雄"></div></section>
   </section>
-  <section class="card"><h2>音乐映射</h2>
-    <div class="row"><input id="championSearch" type="search" placeholder="搜索称号或昵称，例如：亚索" autocomplete="off"/></div>
-    <div class="row"><select id="championInput"><option value="">正在从客户端读取英雄列表…</option></select><button id="useDetected">使用当前英雄</button><button id="refreshChampions">刷新列表</button></div>
-    <div class="row"><strong class="slot-key" id="slotKey1">Ctrl+1</strong><input id="trackLabel1" readonly placeholder="未设置第 1 条音乐"/><button id="chooseTrack1">导入</button><button id="playPreview1">试听</button><button id="clearTrack1" class="danger">清空</button></div>
-    <div class="row"><strong class="slot-key" id="slotKey2">Ctrl+2</strong><input id="trackLabel2" readonly placeholder="未设置第 2 条音乐"/><button id="chooseTrack2">导入</button><button id="playPreview2">试听</button><button id="clearTrack2" class="danger">清空</button></div>
-    <div class="row"><strong class="slot-key" id="slotKey3">Ctrl+3</strong><input id="trackLabel3" readonly placeholder="未设置第 3 条音乐"/><button id="chooseTrack3">导入</button><button id="playPreview3">试听</button><button id="clearTrack3" class="danger">清空</button></div>
+  <details id="musicLibrary" class="card library-panel"><summary><span class="fold-title">管理音乐库</span><span id="librarySummary" class="fold-description">添加公共音乐或英雄专属音乐</span></summary>
+    <div class="tab-bar" role="tablist" aria-label="编辑音乐库"><button id="editPublic" role="tab" aria-selected="true">公共音乐池</button><button id="editChampion" role="tab" aria-selected="false">英雄专属</button></div>
+    <div id="heroEditor" hidden><div class="row"><input id="championSearch" type="search" placeholder="搜索称号或昵称，例如：亚索" autocomplete="off"/></div>
+    <div class="row"><select id="championInput"><option value="">正在从客户端读取英雄列表…</option></select><button id="useDetected">使用当前英雄</button><button id="refreshChampions">刷新列表</button></div></div>
+    <div class="music-slot"><strong class="slot-key" id="slotKey1">Ctrl+1</strong><div class="track-info"><input id="trackLabel1" readonly placeholder="添加第 1 段 BGM"/><small id="trackRange1"></small></div><div class="slot-actions"><button id="chooseTrack1">导入</button><button id="playPreview1">试听</button><button id="editSegment1">片段</button><button id="clearTrack1" class="danger">清空</button></div></div>
+    <div class="music-slot"><strong class="slot-key" id="slotKey2">Ctrl+2</strong><div class="track-info"><input id="trackLabel2" readonly placeholder="添加第 2 段 BGM"/><small id="trackRange2"></small></div><div class="slot-actions"><button id="chooseTrack2">导入</button><button id="playPreview2">试听</button><button id="editSegment2">片段</button><button id="clearTrack2" class="danger">清空</button></div></div>
+    <div class="music-slot"><strong class="slot-key" id="slotKey3">Ctrl+3</strong><div class="track-info"><input id="trackLabel3" readonly placeholder="添加第 3 段 BGM"/><small id="trackRange3"></small></div><div class="slot-actions"><button id="chooseTrack3">导入</button><button id="playPreview3">试听</button><button id="editSegment3">片段</button><button id="clearTrack3" class="danger">清空</button></div></div>
+    <section id="segmentEditor" class="segment-editor" hidden>
+      <div class="row"><strong>选择播放片段</strong><span id="segmentTitle" class="help"></span><button id="segmentClose">收起</button></div>
+      <p class="help">分别拖动开始和结束滑块，选择想听的部分；也可以输入秒数或 分:秒。</p>
+      <div class="boundary-row"><label for="segmentStartRange">开始 <output id="segmentStartValue">0:00</output></label><input id="segmentStartRange" aria-label="拖动设置片段开始" type="range" min="0" max="1" step="0.01"/><input id="segmentStart" aria-label="片段开始时间" value="0:00"/></div>
+      <div class="boundary-row"><label for="segmentEndRange">结束 <output id="segmentEndValue">0:00</output></label><input id="segmentEndRange" aria-label="拖动设置片段结束" type="range" min="0" max="1" step="0.01"/><input id="segmentEnd" aria-label="片段结束时间" placeholder="文件结尾"/></div>
+      <p id="segmentLength" class="segment-summary" role="status"></p>
+      <div class="preview-progress"><label for="segmentSeek">试听进度</label><input id="segmentSeek" aria-label="试听片段进度" type="range" min="0" max="1" step="0.01"/><span id="segmentPosition" class="help"></span></div>
+      <div class="row wrap"><button id="segmentPreview">试听完整片段</button><button id="segmentApply" class="primary">应用片段</button></div>
+    </section>
     <div class="row"><button id="saveMapping" class="primary">保存三条映射</button><button id="removeMapping" class="danger">移除该英雄全部映射</button></div>
     <p id="mappingInfo" class="help"></p>
-  </section>
-  <section class="card"><h2>播放设置</h2>
+  </details>
+  <details class="card settings-panel"><summary><span class="fold-title">音频与快捷键设置</span><span class="fold-description">输出设备、音量与播放按键</span></summary>
     <div class="grid2">
       <div class="row"><label>播放键 1</label><input id="hotkey0" readonly/><button id="editHotkey0">修改</button></div>
       <div class="row"><label>播放键 2</label><input id="hotkey1" readonly/><button id="editHotkey1">修改</button></div>
       <div class="row"><label>播放键 3</label><input id="hotkey2" readonly/><button id="editHotkey2">修改</button></div>
       <div class="row"><label>暂停/继续</label><input id="hotkeyPause" readonly/><button id="editHotkeyPause">修改</button></div>
+      <div class="row"><label>从头播放</label><input value="Ctrl+4" readonly aria-label="从头播放快捷键 Ctrl+4"/><span class="help">固定键位 · 从当前 BGM 片段起点重播</span></div>
     </div>
-    <div class="row" id="captureBar" hidden><span id="captureHint" class="help">请按下新的快捷键…</span><button id="captureConfirm" class="primary" disabled>确认保存</button><button id="captureCancel">取消</button></div>
+    <div class="row" id="captureBar" tabindex="-1" hidden><span id="captureHint" class="help">请按下新的快捷键…</span><button id="captureConfirm" class="primary" disabled>确认保存</button><button id="captureCancel">取消</button></div>
     <p class="help">点击“修改”后按下想要的组合键（Ctrl 或 Shift，可叠加字母、数字、F1~F24），确认后立即生效；不支持 Alt。</p>
     <div class="row"><label for="outputDevice">发送到 QQ</label><select id="outputDevice"><option value="">系统默认输出</option></select><button id="useVoicemeeter">使用 Voicemeeter</button></div>
     <div class="row"><label for="monitorDevice">自己监听</label><select id="monitorDevice"><option value="">系统默认耳机</option></select><button id="refreshDevices">刷新设备</button></div>
-    <div class="row"><label for="musicVolume">音乐音量</label><input id="musicVolume" type="range" min="10" max="70" step="1"/><output id="musicVolumeValue">40%</output></div>
+    <div class="row"><label for="musicVolume">发送到语音</label><input id="musicVolume" type="range" min="0" max="100" step="1"/><output id="musicVolumeValue">13%</output></div>
+    <div class="row"><label for="monitorVolume">自己监听</label><input id="monitorVolume" type="range" min="0" max="100" step="1"/><output id="monitorVolumeValue">13%</output></div>
+    <div class="row wrap"><button id="testMonitor">测试耳机</button><button id="testVirtual">测试虚拟输出</button><button id="stopOutputTest">停止测试</button><button id="reconfigureAudio">重新配置音频</button><span id="outputStatus" class="help" role="status">等待设备检查</span></div>
     <div class="row"><label for="calibrationInput">说话参考</label><select id="calibrationInput"><option value="">自动选择 Voicemeeter B1</option></select><button id="calibrateVolume">麦克风和音乐校准</button></div>
     <p id="calibrationHint" class="help">点击后用平常通话音量连续说话 5 秒；会一次性固定麦克风增益和音乐音量，只计算响度，不录音、不保存语音。</p>
     <label class="toggle-row"><input id="weakNetworkMode" type="checkbox"/><span><strong>QQ 弱网模式</strong><small>只优化送入 B1 的音乐：单声道、语音友好频段和轻度动态压缩。耳机监听保持原音。</small></span></label>
     <label class="toggle-row"><input id="loudnessStabilizer" type="checkbox"/><span><strong>响度稳定器</strong><small>与弱网模式互斥（开启其一时另一个置灰停用）：压缩动态并抬高安静段，对抗 QQ 语音的静音判定和降噪误伤；不削频段、保留立体声。</small></span></label>
-    <p class="help">音乐以 <span id="volumeSummary">40%</span> 音量同时发送到 Voicemeeter B1 和物理耳机；耳机监听不经过 A 通道，因此不会回听麦克风。</p>
+    <p class="help">语音音乐音量 <span id="volumeSummary">13%</span>，耳机监听单独控制。耳机监听不经过 A 通道，不会回听麦克风。</p>
     <p class="help" id="playbackHelp">播放中再按相同播放键或暂停键，都会暂停并从原进度继续。</p>
-  </section>
+  </details>
   <section class="card slim">
     <div class="row"><strong class="card-inline-title">客户端连接</strong><span id="lockfileInfo" class="help"></span><button id="chooseLockfile">手动选择 lockfile</button></div>
   </section>
   <p id="notice" role="status"></p>
 </main>
+<footer class="now-playing"><div><strong id="playingTitle">准备好你的第一段 BGM</strong><small id="playingSource">在公共池导入音乐后即可播放</small></div><div class="play-controls"><button id="playCurrent">播放 / 暂停</button><span id="playingState">待播放</span><span id="playingTime">0:00 / --:--</span></div><progress id="playingProgress" max="100" value="0" aria-label="播放进度"></progress></footer>
 <div id="setupWizard" class="wizard-backdrop" hidden>
   <div class="wizard">
-    <h2>初次配置向导</h2>
+    <div class="row"><h2>音频配置向导</h2><button id="wizardDismiss">稍后配置</button></div>
     <ol class="wizard-steps">
       <li>
         <strong>① 安装 Voicemeeter（虚拟声卡，免费）</strong>
@@ -67,6 +85,7 @@
         <strong>② 选择你的耳机和麦克风</strong>
         <div class="row"><label>耳机（输出/监听）</label><select id="wizardHeadphone"><option value="">请选择</option></select></div>
         <div class="row"><label>麦克风（输入）</label><select id="wizardMicrophone"><option value="">请选择</option></select></div>
+        <div class="row"><button id="wizardRefreshDevices">刷新设备</button><span id="wizardDeviceStatus" class="help" role="status">正在读取音频设备…</span></div>
         <p class="help">下拉列表读取系统设备名；之后可编辑 settings.json 里的 headphoneDeviceName / microphoneDeviceName 更改。</p>
       </li>
       <li>
@@ -90,4 +109,13 @@
     <label class="toggle-row"><input id="closeRemember" type="checkbox"/><span><small>记住此选项，不再询问</small></span></label>
   </div>
 </div>
-<audio id="player"></audio><audio id="qqOutputPlayer"></audio><audio id="monitorPlayer"></audio><audio id="previewPlayer"></audio><script src="champion-aliases.js"></script><script src="app.js"></script></body></html>
+<div id="confirmModal" class="modal-backdrop confirmation-backdrop" hidden>
+  <section class="modal confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmMessage confirmDetail">
+    <button id="confirmClose" class="modal-x" aria-label="关闭提示，继续编辑">✕</button>
+    <span class="confirmation-icon" aria-hidden="true">!</span>
+    <h3 id="confirmTitle">修改尚未保存</h3>
+    <p id="confirmMessage"></p><p id="confirmDetail" class="help"></p>
+    <div class="modal-actions"><button id="confirmCancel">继续编辑</button><button id="confirmProceed" class="primary">放弃修改</button></div>
+  </section>
+</div>
+<audio id="player"></audio><audio id="qqOutputPlayer"></audio><audio id="monitorPlayer"></audio><audio id="previewPlayer"></audio><script src="champion-aliases.js"></script><script src="music-model.js"></script><script src="app.js"></script></body></html>
