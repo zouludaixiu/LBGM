@@ -17,7 +17,7 @@ wav.writeUInt32LE(44100,24); wav.writeUInt32LE(88200,28); wav.writeUInt16LE(2,32
 wav.write('data',36); wav.writeUInt32LE(samples * 2,40);
 fs.writeFileSync(path.join(directory,'test.wav'),wav);
 const track = { name:'高光 BGM · 测试片段', path:path.join(directory,'test.wav'), url:pathToFileURL(path.join(directory,'test.wav')).href, startTime:0.3, endTime:1.3 };
-let fixture = model.migrate({ setupDone:true, mappings:{ 暗裔剑魔:[{...track,name:'英雄专属 BGM'},null,null] },
+let fixture = model.migrate({ audioBackend:'internal', internalMicDeviceName:'麦克风 (Fixture Audio)', internalMicDeviceId:'mic', cableOutputDeviceId:'cable-fixture', setupDone:true, mappings:{ 暗裔剑魔:[{...track,name:'英雄专属 BGM'},null,null] },
   publicTracks:[track,track,null], playHotkeys:['Shift+1','Shift+2','Shift+3'], pauseHotkey:'Ctrl+A',
   musicVolume:0.13, monitorVolume:0.13, weakNetworkMode:false, micGainDb:12,
   headphoneDeviceName:'耳机 (Fixture Audio)',microphoneDeviceName:'麦克风 (Fixture Audio)',
@@ -28,11 +28,15 @@ ipcMain.handle('fixture-track', () => ({...track}));
 let wizardSuccess=false;
 ipcMain.handle('fixture-wizard', (_event,payload) => {
   if(!wizardSuccess)return {ok:false,error:'测试：设备不可用'};
-  fixture={...fixture,...payload,setupDone:true};
+  fixture={...fixture,...payload,internalMicDeviceName:payload.microphoneDeviceName,setupDone:false};
   return {ok:true,settings:{...fixture,testTrackUrl:track.url}};
 });
 app.whenReady().then(async () => {
   const win = new BrowserWindow({ width:1000,height:930,show:false,webPreferences:{ preload:path.join(__dirname,'renderer-preload.cjs'),sandbox:false,contextIsolation:true } });
+  // Music/UI tests never need real microphone access. The separate internal
+  // suite supplies a synthetic stream for its real Web Audio mixing graph.
+  win.webContents.session.setPermissionRequestHandler((_wc,_permission,callback)=>callback(false));
+  win.webContents.session.setPermissionCheckHandler(()=>false);
   const errors=[];
   win.webContents.on('console-message', event => { if(event.level === 'error') errors.push(event.message); });
   try {
@@ -56,6 +60,13 @@ app.whenReady().then(async () => {
     const results = await win.webContents.executeJavaScript(`(async () => {
       const passed=[];
       const check=(value,label)=>{if(!value)throw new Error(label);passed.push(label)};
+      // Ignore host device-change events and other concurrently running tests.
+      // Keep the fake monitor in the enumerated inventory for preview checks.
+      Object.defineProperty(navigator.mediaDevices,'enumerateDevices',{configurable:true,value:async()=>[
+        {deviceId:'ears-fixture',kind:'audiooutput',label:'耳机 (Fixture Audio)'},
+        {deviceId:'cable-fixture',kind:'audiooutput',label:'CABLE Input'},
+        {deviceId:'mic',kind:'audioinput',label:'麦克风 (Fixture Audio)'}
+      ]});
       check(!document.getElementById('notice').textContent.includes('初始化失败'), '界面初始化');
       check(settings.musicVolume===0.13 && settings.monitorVolume===0.13,'旧音量保留');
       check(document.getElementById('slotKey1').textContent==='Shift+1','旧快捷键保留');
@@ -79,7 +90,7 @@ app.whenReady().then(async () => {
       let timedOut=false;
       try { await waitForResult(new Promise(()=>{}),20,'测试超时'); } catch(error) { timedOut=error.message==='测试超时'; }
       check(timedOut,'向导等待具备超时保护');
-      wizardDeviceLists={outputs:[{deviceId:'default',label:'Default - 耳机 (Fixture Audio)'},{deviceId:'real',label:'耳机 (Fixture Audio)'}],inputs:[{deviceId:'default',label:'Default - 麦克风 (Fixture Audio)'},{deviceId:'mic',label:'麦克风 (Fixture Audio)'}]};
+      wizardDeviceLists={outputs:[{deviceId:'default',label:'Default - 耳机 (Fixture Audio)'},{deviceId:'real',label:'耳机 (Fixture Audio)'},{deviceId:'cable-fixture',label:'CABLE Input'}],inputs:[{deviceId:'default',label:'Default - 麦克风 (Fixture Audio)'},{deviceId:'mic',label:'麦克风 (Fixture Audio)'}]};
       fillWizardDeviceOptions();
       check(document.getElementById('wizardHeadphone').options.length===2,'向导设备列表去重');
       document.getElementById('wizardHeadphone').value='耳机 (Fixture Audio)';
@@ -90,10 +101,12 @@ app.whenReady().then(async () => {
       document.getElementById('wizardDismiss').click();
       check(document.getElementById('setupWizard').hidden,'向导可关闭且不会阻挡后续操作');
       // Use real media decoding, with every playback element muted.
-      for(const media of [player,monitorPlayer,qqOutputPlayer,previewPlayer])media.muted=true;
+      for(const media of [player,monitorPlayer,previewPlayer])media.muted=true;
       setSink=async()=>true;
       ensureQqAudioGraph=async()=>false;
       qqAudioGraph=null;
+      audioDevices=[{deviceId:'ears-fixture',kind:'audiooutput',label:'耳机 (Fixture Audio)'}];settings.monitorDeviceId='ears-fixture';$('monitorDevice').replaceChildren(new Option('耳机 (Fixture Audio)','ears-fixture'));
+      setOutputDevices=async()=>true;connectInternalAudio=async()=>true;
       document.getElementById('outputDevice').add(new Option('虚拟测试设备','virtual-fixture'));
       document.getElementById('outputDevice').value='virtual-fixture';
       await document.getElementById('dailySlot0').onclick();
@@ -171,9 +184,8 @@ app.whenReady().then(async () => {
       check(settings.musicVolume===0 && monitorPlayer.volume===0.24,'语音静音不影响监听');
       await testOutput(false);
       check(outputTest && !outputTest.paused && outputTest.volume===0.24,'耳机输出测试使用监听音量');
-      await testOutput(true);
-      check(outputTest && !outputTest.paused && outputTest.volume===0,'虚拟输出测试使用语音音量');
       stopOutputTest();
+      check(outputTest===null,'停止耳机测试释放播放器；混合虚拟输出由独立整合测试覆盖');
       check(parseTime('1:15')===75,'片段时间解析');
       const before=player.currentTime;
       const originalOutput=setOutputDevices;
@@ -233,14 +245,14 @@ app.whenReady().then(async () => {
       check(document.getElementById('musicLibrary').open,'新用户音乐库默认展开');
       await document.getElementById('wizardFinish').onclick();
       check(document.getElementById('wizardResult').textContent.includes('选择耳机和麦克风'),'向导缺少设备时提示而不挂起');
-      wizardDeviceLists={outputs:[{deviceId:'headphone-fixture',label:'耳机 (Fixture Audio)'}],inputs:[{deviceId:'microphone-fixture',label:'麦克风 (Fixture Audio)'}]};fillWizardDeviceOptions();
+      wizardDeviceLists={outputs:[{deviceId:'headphone-fixture',label:'耳机 (Fixture Audio)'},{deviceId:'cable-fixture',label:'CABLE Input'}],inputs:[{deviceId:'microphone-fixture',label:'麦克风 (Fixture Audio)'}]};fillWizardDeviceOptions();
       document.getElementById('wizardHeadphone').value='耳机 (Fixture Audio)';
       document.getElementById('wizardMicrophone').value='麦克风 (Fixture Audio)';
-      refreshDevices=async()=>{document.getElementById('outputDevice').replaceChildren(new Option('Voicemeeter Input','virtual-fixture'));document.getElementById('monitorDevice').replaceChildren(new Option('耳机 (Fixture Audio)','headphone-fixture'));return wizardDeviceLists};
-      setOutputDevices=async()=>true;
+      refreshDevices=async()=>{document.getElementById('outputDevice').replaceChildren(new Option('CABLE Input','cable-fixture'));document.getElementById('monitorDevice').replaceChildren(new Option('耳机 (Fixture Audio)','headphone-fixture'));return wizardDeviceLists};
+      setOutputDevices=async()=>true;connectInternalAudio=async()=>true;
       await document.getElementById('wizardFinish').onclick();
       check(document.getElementById('setupWizard').hidden && settings.setupDone,'向导成功完成并解除遮挡');
-      check(settings.outputDeviceId==='virtual-fixture' && settings.monitorDeviceId==='headphone-fixture','向导保存虚拟输出与物理耳机');
+      check(settings.cableOutputDeviceId==='cable-fixture' && settings.monitorDeviceId==='headphone-fixture','向导保存虚拟输出与物理耳机');
       check(settings.musicVolume===0.13 && settings.micGainDb===12,'首次向导保留默认音量与增益');
       await restartCurrentPlayback();
       check(document.getElementById('notice').textContent.includes('没有可重播'),'无当前音乐重播有明确提示');

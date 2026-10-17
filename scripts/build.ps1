@@ -10,7 +10,7 @@ if (-not (Test-Path -LiteralPath $csc)) { throw '.NET Framework 64-bit compiler 
 # The hotkey helper executable is locked while the soundboard runs.
 $electron = Join-Path $root 'node_modules\electron\dist\electron.exe'
 $running = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-  Where-Object { $_.ExecutablePath -eq $electron -or $_.Name -eq 'AudioRouteWatchdog.exe' }
+  Where-Object { $_.ExecutablePath -eq $electron }
 if ($running) { throw 'The soundboard is still running. Quit it from the tray before building.' }
 
 # NOTE: the hotkey helper source keeps its historical name (GameHotkeyHelper.cs)
@@ -21,12 +21,6 @@ $helperOut = Join-Path $PSScriptRoot 'GameHotkeyStateHelperV2.exe'
 & $csc /nologo /optimize+ /platform:x64 /target:winexe /out:"$helperOut" "$helperSrc"
 if ($LASTEXITCODE -ne 0) { throw 'GameHotkeyStateHelperV2.exe compilation failed.' }
 
-# The running-app check above prevents replacing a locked helper.
-$watchdogSrc = Join-Path $PSScriptRoot 'AudioRouteWatchdog.cs'
-$watchdogOut = Join-Path $PSScriptRoot 'AudioRouteWatchdog.exe'
-& $csc /nologo /optimize+ /platform:x64 /target:winexe /out:"$watchdogOut" "$watchdogSrc"
-if ($LASTEXITCODE -ne 0) { throw 'AudioRouteWatchdog compilation failed.' }
-
 node --check (Join-Path $root 'main.js')
 if ($LASTEXITCODE -ne 0) { throw 'main.js syntax check failed.' }
 node --check (Join-Path $root 'renderer\app.js')
@@ -35,6 +29,5 @@ if ($LASTEXITCODE -ne 0) { throw 'renderer/app.js syntax check failed.' }
 [pscustomobject]@{
   ok = $true
   hotkeyHelper = $helperOut
-  watchdog = $watchdogOut
-  note = 'Both helpers are ready for packaging.'
+  note = 'The game hotkey helper is ready for packaging.'
 } | ConvertTo-Json -Compress

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, dialog, globalShortcut, ipcMain } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, dialog, globalShortcut, ipcMain, shell } = require('electron');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const https = require('https');
@@ -6,6 +6,22 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 const { execFile, spawn } = require('child_process');
 const MusicModel = require('./renderer/music-model');
+
+// Local preview keeps the installed application, mappings and shortcut intact.
+const AUDIO_PREVIEW = process.argv.includes('--audio-preview');
+if (AUDIO_PREVIEW) {
+  const original = path.join(app.getPath('appData'), 'champion-soundboard', 'settings.json');
+  const previewDirectory = path.join(app.getPath('appData'), 'lbgm-internal-preview');
+  app.setName('LBGM 内部混音测试版');
+  app.setPath('userData', previewDirectory);
+  const target = path.join(previewDirectory, 'settings.json');
+  if (!fs.existsSync(target)) {
+    let source = {}; try { source = JSON.parse(fs.readFileSync(original, 'utf8')); } catch { /* new user */ }
+    source = { ...source, audioBackend: 'internal', setupDone: false, internalMicDeviceName: source.microphoneDeviceName || '', cableOutputDeviceName: 'CABLE Input (VB-Audio Virtual Cable)', internalMicGainDb: 0, internalWeakNetworkMode: false, internalLoudnessStabilizer: false };
+    fs.mkdirSync(previewDirectory, { recursive: true });
+    fs.writeFileSync(target, JSON.stringify(source, null, 2));
+  }
+}
 
 // Playback is intentionally initiated by a trusted local global hotkey rather
 // than a click inside the renderer, so do not let Chromium's autoplay policy
@@ -29,21 +45,16 @@ const RESTART_HOTKEY = 'Ctrl+4';
 // offered because the native game helper cannot read it.
 const HOTKEY_PATTERN = /^(?:(?:Ctrl\+Shift|Shift\+Ctrl|Ctrl|Shift)\+)(?:[A-Z0-9]|F(?:[1-9]|1\d|2[0-4]))$/;
 const DEFAULT_MUSIC_VOLUME = 0.13;
-const DEFAULT_MIC_GAIN_DB = 12;
-// Device names are chosen by the user in the first-run wizard (per-machine
-// settings); no specific hardware is assumed. Voicemeeter's default install
-// directory is the only fixed path (public, applies to every user).
+// Physical devices are chosen explicitly; Windows defaults stay untouched.
 const DEFAULT_HEADPHONE_NAME = '';
 const DEFAULT_MICROPHONE_NAME = '';
-const DEFAULT_VOICEMEETER_DIR = 'C:\\Program Files (x86)\\VB\\Voicemeeter';
-let config = MusicModel.migrate({ playHotkeys: [...DEFAULT_PLAY_HOTKEYS], pauseHotkey: 'Ctrl+A', musicVolume: DEFAULT_MUSIC_VOLUME, micGainDb: DEFAULT_MIC_GAIN_DB, weakNetworkMode: true, loudnessStabilizer: false, calibrationInputDeviceId: '', mappings: {}, lockfilePath: '', outputDeviceId: '', monitorDeviceId: '', headphoneDeviceName: DEFAULT_HEADPHONE_NAME, microphoneDeviceName: DEFAULT_MICROPHONE_NAME, voicemeeterDir: DEFAULT_VOICEMEETER_DIR, manualChampion: '', closeAction: '', setupDone: false });
+let config = MusicModel.migrate({ playHotkeys: [...DEFAULT_PLAY_HOTKEYS], pauseHotkey: 'Ctrl+A', musicVolume: DEFAULT_MUSIC_VOLUME, weakNetworkMode: true, loudnessStabilizer: false, calibrationInputDeviceId: '', mappings: {}, lockfilePath: '', outputDeviceId: '', monitorDeviceId: '', headphoneDeviceName: DEFAULT_HEADPHONE_NAME, microphoneDeviceName: DEFAULT_MICROPHONE_NAME, manualChampion: '', closeAction: '', setupDone: false });
 let lcuTimer;
 let lcuPollInFlight = false;
 let lastProcessLockCheckAt = 0;
 let lastChampion = null;
 let hotkeyHelper = null;
 let hotkeyPollTimer = null;
-let audioRouteWatchdog = null;
 let lastHotkeyEventId = null;
 let quitting = false;
 let lastPlayTriggerAt = 0;
@@ -51,7 +62,6 @@ let lastPauseTriggerAt = 0;
 let lastRestartTriggerAt = 0;
 let hotkeyCapture = null;
 let closeConfirmInFlight = false;
-let audioConfigInFlight = null;
 // Champion detection polls every second; the id→name list is cached in memory
 // so a poll tick never refetches or rewrites the champion list files.
 const CHAMPION_LIST_TTL_MS = 5 * 60 * 1000;
@@ -132,7 +142,8 @@ async function loadConfig() {
     }
     config.mappings = mappings;
     config.monitorVolume = Number.isFinite(stored.monitorVolume) ? stored.monitorVolume : (Number.isFinite(stored.musicVolume) ? stored.musicVolume : DEFAULT_MUSIC_VOLUME);
-    config = MusicModel.migrate(config);
+    if (stored.audioBackend !== 'internal') migrated = true;
+    config = MusicModel.migrate({ ...config, audioBackend: stored.audioBackend });
     if (!Array.isArray(stored.publicTracks) || !Number.isFinite(stored.monitorVolume) || !Array.isArray(stored.recentChampions)) migrated = true;
     if (typeof stored.weakNetworkMode !== 'boolean') {
       config.weakNetworkMode = true;
@@ -144,10 +155,6 @@ async function loadConfig() {
     }
     if (typeof stored.setupDone !== 'boolean') {
       config.setupDone = false;
-      migrated = true;
-    }
-    if (!Number.isFinite(stored.micGainDb)) {
-      config.micGainDb = DEFAULT_MIC_GAIN_DB;
       migrated = true;
     }
     if (!Number.isFinite(stored.musicVolume)) {
@@ -170,36 +177,7 @@ function saveConfig() {
   return operation;
 }
 function serializableConfig() {
-  return { ...MusicModel.migrate(config), testTrackUrl: pathToFileURL(ensureTestTrack()).href };
-}
-
-function runAudioConfig() {
-  const script = path.join(scriptsDir(), 'configure-audio.ps1');
-  return new Promise(resolve => {
-    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script,
-      '-MicGainDb', String(config.micGainDb ?? DEFAULT_MIC_GAIN_DB),
-      '-Headphones', String(config.headphoneDeviceName ?? DEFAULT_HEADPHONE_NAME),
-      '-Microphone', String(config.microphoneDeviceName ?? DEFAULT_MICROPHONE_NAME),
-      '-VoicemeeterDir', String(config.voicemeeterDir ?? DEFAULT_VOICEMEETER_DIR)],
-      { windowsHide: true, timeout: 35000, maxBuffer: 1024 * 128 }, (error, stdout, stderr) => {
-        const status = {
-          ok: !error,
-          checkedAt: new Date().toISOString(),
-          output: stdout.trim(),
-          error: error ? (error.killed ? '音频配置超过 35 秒，请检查设备连接后重试。' : (stderr.trim() || error.message)) : ''
-        };
-        try { fs.writeFileSync(path.join(app.getPath('userData'), 'audio-config-status.json'), JSON.stringify(status, null, 2)); } catch { /* diagnostics only */ }
-        resolve(status);
-      });
-  });
-}
-function configureAudioRouting() {
-  // Voicemeeter configuration must never run twice concurrently (startup and
-  // microphone calibration can overlap); later callers share the running run.
-  if (!audioConfigInFlight) {
-    audioConfigInFlight = runAudioConfig().finally(() => { audioConfigInFlight = null; });
-  }
-  return audioConfigInFlight;
+  return { ...MusicModel.migrate(config), audioPreview: AUDIO_PREVIEW, previewBuild: AUDIO_PREVIEW ? '2026.10.17' : '', testTrackUrl: pathToFileURL(ensureTestTrack()).href };
 }
 
 function ensureDesktopShortcut() {
@@ -216,19 +194,6 @@ function ensureDesktopShortcut() {
         resolve(status);
       });
   });
-}
-
-function startAudioRouteWatchdog() {
-  if (audioRouteWatchdog && audioRouteWatchdog.exitCode === null) audioRouteWatchdog.kill();
-  audioRouteWatchdog = null;
-  const helper = path.join(scriptsDir(), 'AudioRouteWatchdog.exe');
-  if (!fs.existsSync(helper)) return false;
-  const watchdogStatus = path.join(app.getPath('userData'), 'audio-watchdog-status.json');
-  const child = spawn(helper, [String(process.pid), String(config.micGainDb ?? DEFAULT_MIC_GAIN_DB), watchdogStatus], { windowsHide: true, stdio: 'ignore' });
-  audioRouteWatchdog = child;
-  child.on('error', () => { if (audioRouteWatchdog === child) audioRouteWatchdog = null; });
-  child.on('exit', () => { if (audioRouteWatchdog === child) audioRouteWatchdog = null; });
-  return true;
 }
 
 function ensureTestTrack() {
@@ -740,13 +705,19 @@ function createTray() {
     tray.setContextMenu(Menu.buildFromTemplate([
       { label: '显示主窗口', click: showMainWindow },
       { type: 'separator' },
-      { label: '退出', click: () => app.quit() }
+      { label: '退出', click: () => { showMainWindow(); closeConfirmInFlight = true; emit('confirm-close'); } }
     ]));
     tray.on('double-click', showMainWindow);
   } catch { /* tray is cosmetic; the app works without it */ }
 }
 function createWindow() {
   win = new BrowserWindow({ width: 840, height: 720, minWidth: 680, minHeight: 600, frame: false, webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
+  const ownPage = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
+  const permitted = (wc, permission) => wc === win?.webContents && wc.getURL() === ownPage && ['media', 'speaker-selection'].includes(permission);
+  win.webContents.session.setPermissionRequestHandler((wc, permission, callback) => callback(permitted(wc, permission)));
+  win.webContents.session.setPermissionCheckHandler((wc, permission) => permitted(wc, permission));
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (event, url) => { if (url !== ownPage) event.preventDefault(); });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   win.webContents.on('did-finish-load', async () => {
     try {
@@ -759,7 +730,6 @@ function createWindow() {
     if (quitting) return;
     event.preventDefault();
     if (config.closeAction === 'tray') { win.hide(); return; }
-    if (config.closeAction === 'exit') { quitting = true; app.quit(); return; }
     if (closeConfirmInFlight) return;
     // Nobody can answer the in-app prompt before the renderer is ready (or
     // after it crashed); hiding to tray is the safe fallback.
@@ -778,16 +748,7 @@ app.whenReady().then(async () => {
   // The renderer may load after the first status was deduplicated away; make
   // sure it eventually receives the current state either way.
   setInterval(replayRendererState, 10000);
-  // Heavy, side-effectful setup runs after the window is visible so launch does
-  // not wait ~10s on Voicemeeter and PowerShell. Hotkeys and the LCU poll above
-  // do not depend on it.
-  if (config.setupDone && config.headphoneDeviceName && config.microphoneDeviceName) {
-    configureAudioRouting().then(result => {
-      if (result.ok) startAudioRouteWatchdog();
-      emit('audio-setup-status', result);
-    });
-  }
-  ensureDesktopShortcut();
+  if (!AUDIO_PREVIEW) ensureDesktopShortcut();
   getDdragonNicknames().catch(() => {}); // seed the automatic nickname table
   // Safety net: if the renderer dies mid-capture, restore global shortcuts.
   setInterval(() => {
@@ -798,7 +759,7 @@ app.whenReady().then(async () => {
   }, 1000);
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
-app.on('will-quit', () => { quitting = true; globalShortcut.unregisterAll(); if (hotkeyPollTimer) clearInterval(hotkeyPollTimer); if (hotkeyHelper && hotkeyHelper.exitCode === null) hotkeyHelper.kill(); if (audioRouteWatchdog && audioRouteWatchdog.exitCode === null) audioRouteWatchdog.kill(); });
+app.on('will-quit', () => { quitting = true; globalShortcut.unregisterAll(); if (hotkeyPollTimer) clearInterval(hotkeyPollTimer); if (hotkeyHelper && hotkeyHelper.exitCode === null) hotkeyHelper.kill(); });
 
 ipcMain.handle('get-settings', () => ({ ...serializableConfig(), lastChampion }));
 ipcMain.handle('report-playback', (_event, status) => {
@@ -857,6 +818,7 @@ ipcMain.handle('get-champion-avatar', async (_event, requestedId) => {
 });
 ipcMain.handle('get-champion-nicknames', (_event, force) => getDdragonNicknames(Boolean(force)));
 ipcMain.handle('save-settings', async (_event, changes) => {
+  if ('audioBackend' in changes && changes.audioBackend !== 'internal') return { ok: false, error: '未知的音频方案。' };
   const hotkeysChanged = Object.prototype.hasOwnProperty.call(changes, 'playHotkeys') || Object.prototype.hasOwnProperty.call(changes, 'pauseHotkey');
   if (hotkeysChanged) {
     const previous = { playHotkeys: [...config.playHotkeys], pauseHotkey: config.pauseHotkey };
@@ -916,70 +878,33 @@ ipcMain.handle('close-choice', (_event, choice) => {
   return true;
 });
 // —— 首次配置向导 ——
-const VOICEMEETER_DOWNLOAD_URL = 'https://download.vb-audio.com/Download_CABLE/VoicemeeterProSetup.exe';
-function downloadFile(url, dest) {
-  return new Promise((resolve, reject) => {
-    const request = (target, redirects) => {
-      if (redirects > 4) return reject(new Error('too many redirects'));
-      const req = https.get(target, { headers: { 'User-Agent': 'lbgm/1.0' } }, res => {
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          res.resume();
-          return request(new URL(res.headers.location, target).toString(), redirects + 1);
-        }
-        if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode}`)); }
-        const file = fs.createWriteStream(dest);
-        res.pipe(file);
-        file.on('finish', () => file.close(resolve));
-        file.on('error', reject);
-      });
-      req.setTimeout(60000, () => req.destroy(new Error('下载超时')));
-      req.on('error', reject);
-    };
-    request(url, 0);
-  });
-}
-ipcMain.handle('wizard-vm-status', () => {
-  const exe = path.join(config.voicemeeterDir || DEFAULT_VOICEMEETER_DIR, 'voicemeeter_x64.exe');
-  return { installed: fs.existsSync(exe) };
-});
-ipcMain.handle('wizard-vm-install', async () => {
-  const dest = path.join(app.getPath('temp'), 'VoicemeeterProSetup.exe');
-  try {
-    await downloadFile(VOICEMEETER_DOWNLOAD_URL, dest);
-    const child = spawn(dest, [], { detached: true, stdio: 'ignore' });
-    child.unref();
-    return { ok: true };
-  } catch (error) {
-    return { ok: false, error: String(error.message || error) };
-  }
-});
 ipcMain.handle('wizard-complete', async (_event, payload) => {
+  const backend = payload?.audioBackend || 'internal';
+  if (backend !== 'internal') return { ok: false, error: '未知的音频方案。' };
   const headphoneDeviceName = MusicModel.deviceName(payload?.headphoneDeviceName);
   const microphoneDeviceName = MusicModel.deviceName(payload?.microphoneDeviceName);
   if (!headphoneDeviceName || !microphoneDeviceName) return { ok: false, error: '请先选择耳机和麦克风。' };
-  if (audioConfigInFlight) await audioConfigInFlight.catch(() => {});
-  config.headphoneDeviceName = headphoneDeviceName;
-  config.microphoneDeviceName = microphoneDeviceName;
-  config.setupDone = false;
-  const routing = await configureAudioRouting();
-  if (routing.ok) {
-    config.setupDone = true;
-    startAudioRouteWatchdog();
+  {
+    const validId = id => typeof id === 'string' && id && !['default', 'communications'].includes(id);
+    if (!validId(payload.internalMicDeviceId) || !validId(payload.cableOutputDeviceId) || !validId(payload.monitorDeviceId) || !/^CABLE(?:-[A-D])? Input\b/i.test(payload.cableOutputDeviceName || '') || /voicemeeter|cable|loopback|stereo mix|立体声混音/i.test(microphoneDeviceName + ' ' + headphoneDeviceName)) return { ok: false, error: '请明确选择真实耳机、麦克风和 CABLE Input。' };
+    const backup = path.join(app.getPath('userData'), 'settings.before-internal-audio.json');
+    if (!fs.existsSync(backup) && fs.existsSync(configPath())) await fsp.copyFile(configPath(), backup);
+    config = { ...config, audioBackend: backend, internalMicDeviceId: payload.internalMicDeviceId, internalMicDeviceName: microphoneDeviceName, cableOutputDeviceId: payload.cableOutputDeviceId, cableOutputDeviceName: payload.cableOutputDeviceName, monitorDeviceId: payload.monitorDeviceId, headphoneDeviceName, setupDone: false };
+    await saveConfig();
+    return { ok: true, settings: serializableConfig(), defaultsUnchanged: true };
   }
-  await saveConfig();
-  return { ok: routing.ok, settings: serializableConfig(), error: routing.error || '' };
+
 });
 ipcMain.handle('apply-mic-gain', async (_event, requestedGainDb) => {
-  const micGainDb = Math.max(-3, Math.min(12, Number(requestedGainDb) || 0));
-  config.micGainDb = Math.round(micGainDb * 10) / 10;
-  await saveConfig();
-  // A calibration request must apply the NEW gain, so never reuse an audio
-  // config run that started before the change.
-  if (audioConfigInFlight) await audioConfigInFlight.catch(() => {});
-  const routing = await configureAudioRouting();
-  startAudioRouteWatchdog();
-  return { ok: routing.ok, micGainDb: config.micGainDb, error: routing.error || '' };
+  {
+    config.internalMicGainDb = Math.round(Math.max(-24, Math.min(12, Number(requestedGainDb) || 0)) * 10) / 10;
+    await saveConfig();
+    return { ok: true, micGainDb: config.internalMicGainDb, backend: 'internal' };
+  }
+
 });
+ipcMain.handle('cable-help', () => shell.openExternal('https://vb-audio.com/Cable/'));
+ipcMain.handle('open-windows-sound', () => shell.openExternal('ms-settings:sound'));
 ipcMain.handle('choose-audio', async () => {
   const result = await dialog.showOpenDialog(win, { title: '选择英雄音乐', properties: ['openFile'], filters: [{ name: '音频文件', extensions: ['mp3', 'wav', 'ogg', 'm4a', 'flac'] }] });
   if (result.canceled || !result.filePaths[0]) return null;

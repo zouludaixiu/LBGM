@@ -16,8 +16,8 @@ contextBridge.exposeInMainWorld('soundboard', {
   rendererReady: () => ipcRenderer.invoke('renderer-ready'),
   windowControl: action => ipcRenderer.invoke('window-control', action),
   submitCloseChoice: (action, remember) => ipcRenderer.invoke('close-choice', { action, remember }),
-  vmStatus: () => ipcRenderer.invoke('wizard-vm-status'),
-  vmInstall: () => ipcRenderer.invoke('wizard-vm-install'),
+  cableHelp: () => ipcRenderer.invoke('cable-help'),
+  openWindowsSound: () => ipcRenderer.invoke('open-windows-sound'),
   wizardComplete: payload => ipcRenderer.invoke('wizard-complete', payload),
   onConfirmClose: callback => ipcRenderer.on('confirm-close', () => callback()),
   onMaximizeState: callback => ipcRenderer.on('maximize-state', (_e, maximized) => callback(maximized)),
@@ -25,6 +25,5 @@ contextBridge.exposeInMainWorld('soundboard', {
   onPause: callback => ipcRenderer.on('pause-playback', callback),
   onRestart: callback => ipcRenderer.on('restart-playback', callback),
   onChampion: callback => ipcRenderer.on('champion-detected', (_e, champion) => callback(champion)),
-  onLcuStatus: callback => ipcRenderer.on('lcu-status', (_e, status) => callback(status)),
-  onAudioSetupStatus: callback => ipcRenderer.on('audio-setup-status', (_e, status) => callback(status))
+  onLcuStatus: callback => ipcRenderer.on('lcu-status', (_e, status) => callback(status))
 });

@@ -199,3 +199,12 @@ progress::-webkit-progress-value { background:#50856c; border-radius:8px; }
 .confirmation-dialog .modal-actions { margin-top:24px; }
 #captureBar:focus { outline:2px solid #729e83; outline-offset:3px; }
 @media (max-width:600px) { .boundary-row { grid-template-columns:80px minmax(40px,1fr) 70px; gap:8px; } .boundary-row input:not([type=range]) { width:70px; } .preview-progress { flex-wrap:wrap; } }
+/* Internal mixing is a small optional panel, not another settings page. */
+.internal-audio-panel { background:#f5f8f7; border:1px solid #dbe7e1; border-radius:14px; padding:14px; margin:12px 0; }
+.audio-meters { display:flex; flex-wrap:wrap; gap:18px; margin:12px 0; }
+.audio-meters label { display:flex; align-items:center; gap:8px; color:#52675b; }
+.audio-meters meter { width:130px; height:12px; }
+#internalAudioStatus { color:#376652; }
+#internalAudioStatus.audio-error { color:#b42335; }
+.system-audio-warning { padding:12px; background:#fff7e8; border:1px solid #ecd4a9; border-radius:12px; margin:10px 0; }
+.system-audio-warning p { color:#775319; }

@@ -40,3 +40,27 @@ test('音频设备别名标准化，默认/通信项去重且排除Voicemeeter',
   assert.equal(result.length,1);
   assert.equal(result[0].deviceId,'real');
 });
+
+test('真实MediaDeviceInfo原型getter保留设备ID，向导不会误判真实麦克风为默认项', () => {
+  // Browser MediaDeviceInfo objects cannot be faithfully represented by a
+  // plain object with enumerable deviceId/label fields.
+  const make = (id,label) => Object.create(Object.defineProperties({}, {
+    deviceId:{get:()=>id},label:{get:()=>label},kind:{get:()=> 'audioinput'},groupId:{get:()=> 'physical-usb'}
+  }));
+  const mic=make('physical-usb','麦克风 (Fixture USB Audio)');
+  assert.deepEqual({...mic},{});
+  const devices=model.physicalDevices([make('default','Default - 麦克风 (Fixture USB Audio)'),mic,make('communications','Communications - 麦克风 (Fixture USB Audio)')]);
+  assert.equal(devices.length,1);assert.equal(devices[0].deviceId,'physical-usb');
+  assert.equal(devices[0].kind,'audioinput');assert.equal(devices[0].groupId,'physical-usb');
+  const {validate}=require('../renderer/internal-audio');
+  assert.doesNotThrow(()=>validate({mic:devices[0],monitor:{deviceId:'ears',label:'耳机 (Fixture USB Audio)'},cable:{deviceId:'cable',label:'CABLE Input'}}));
+});
+
+test('设备恢复优先精确ID，ID变化时仅恢复唯一同名设备', () => {
+  const first={deviceId:'other',label:'CABLE Input'},chosen={deviceId:'saved',label:'CABLE Input'};
+  assert.equal(model.matchDevice([first,chosen],'saved','CABLE Input'),chosen);
+  assert.equal(model.matchDevice([chosen],'old-id','CABLE Input'),chosen);
+  assert.equal(model.matchDevice([first,chosen],'old-id','CABLE Input'),null);
+  assert.equal(model.matchDevice([{deviceId:'default',label:'CABLE Input'}],'default','CABLE Input'),null);
+  assert.equal(model.matchDevice([{deviceId:'new',label:'Default - USB Mic'}],'old-id','USB Mic').deviceId,'new');
+});

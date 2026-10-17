@@ -23,6 +23,13 @@
     result.monitorVolume = Number.isFinite(settings.monitorVolume) ? settings.monitorVolume : (settings.musicVolume ?? 0.13);
     result.recentChampions = [...new Set((settings.recentChampions || []).filter(name => typeof name === 'string' && name))].slice(0, 8);
     result.playbackMode = settings.playbackMode === 'public' ? 'public' : 'auto';
+    // Preserve the library and legacy calibration fields, but never reactivate
+    // retired routing. Migrating a legacy setup requires explicit CABLE setup.
+    result.audioBackend = 'internal';
+    if (settings.audioBackend !== 'internal') result.setupDone = false;
+    result.internalMicGainDb = Number.isFinite(settings.internalMicGainDb) ? Math.max(-24, Math.min(12, settings.internalMicGainDb)) : 0;
+    result.internalWeakNetworkMode = settings.internalWeakNetworkMode === true;
+    result.internalLoudnessStabilizer = settings.internalLoudnessStabilizer === true;
     return result;
   }
   function recent(list, name) { return [name, ...list.filter(item => item !== name)].slice(0, 8); }
@@ -31,11 +38,21 @@
     const result = new Map();
     for (const device of devices) {
       const name = deviceName(device.label);
-      if (!name || /voicemeeter/i.test(name)) continue;
-      if (!result.has(name) || !['default', 'communications'].includes(device.deviceId)) result.set(name, { ...device, label: name });
+      if (!name || /voicemeeter|cable|stereo mix|立体声混音|loopback|steam streaming/i.test(name)) continue;
+      // MediaDeviceInfo exposes its fields as prototype getters, not own
+      // enumerable properties. Object spread silently discards the real ID.
+      if (!result.has(name) || !['default', 'communications'].includes(device.deviceId)) result.set(name, { deviceId: device.deviceId, kind: device.kind, groupId: device.groupId, label: name });
     }
     return [...result.values()];
   }
   function same(a, b) { return Boolean(a && b && a.url === b.url && (a.startTime || 0) === (b.startTime || 0) && (a.endTime ?? null) === (b.endTime ?? null)); }
-  return { slots, resolve, range, migrate, recent, same, deviceName, physicalDevices };
+  function matchDevice(devices, id, name) {
+    const explicit = devices.filter(device => device.deviceId && !['default', 'communications'].includes(device.deviceId));
+    const exact = explicit.find(device => device.deviceId === id);
+    if (exact) return exact;
+    const matches = name ? explicit.filter(device => deviceName(device.label) === deviceName(name)) : [];
+    // Never guess between identically named USB devices after an ID changes.
+    return matches.length === 1 ? matches[0] : null;
+  }
+  return { slots, resolve, range, migrate, recent, same, deviceName, physicalDevices, matchDevice };
 });

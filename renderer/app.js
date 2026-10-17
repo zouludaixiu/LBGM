@@ -1,6 +1,5 @@
 const $ = id => document.getElementById(id);
 const player = $('player');
-const qqOutputPlayer = $('qqOutputPlayer');
 const monitorPlayer = $('monitorPlayer');
 const previewPlayer = $('previewPlayer');
 
@@ -17,6 +16,13 @@ let activeKey = '';
 let activeSlot = -1;
 let activeTrack = null;
 let qqAudioGraph = null;
+let internalRoute = null;
+let internalConnecting = false;
+let internalConnectionTicket = 0;
+let internalPendingDevices = null;
+let audioDevices = [];
+const weakEnabled = () => Boolean(settings?.internalWeakNetworkMode);
+const stabilizerEnabled = () => Boolean(settings?.internalLoudnessStabilizer);
 let captureTarget = null; // 0 | 1 | 2 | 'pause'
 let capturedHotkey = '';
 let captureStarting = false;
@@ -150,7 +156,7 @@ function renderDailySlots() {
   updateDailyPlayingState();
 }
 function finishActive() {
-  player.pause(); qqOutputPlayer.pause(); monitorPlayer.pause();
+  player.pause(); monitorPlayer.pause();
   activeFinished = true;
   renderPlaybackStatus();
 }
@@ -410,9 +416,9 @@ async function confirmHotkeyCapture() {
 
 function applyWeakNetworkGraph() {
   if (!qqAudioGraph) return;
-  const weak = Boolean(settings?.weakNetworkMode);
+  const weak = weakEnabled();
   // 响度稳定器只在弱网模式关闭时生效（弱网模式自身含更强的压缩处理）。
-  const stab = !weak && Boolean(settings?.loudnessStabilizer);
+  const stab = !weak && stabilizerEnabled();
   const now = qqAudioGraph.context.currentTime;
   qqAudioGraph.bypassGain.gain.setValueAtTime(!weak && !stab ? 1 : 0, now);
   qqAudioGraph.weakGain.gain.setValueAtTime(weak ? 1 : 0, now);
@@ -429,7 +435,7 @@ async function ensureQqAudioGraph() {
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   if (!AudioContextClass) return false;
   try {
-    const context = new AudioContextClass({ latencyHint: 'interactive' });
+    const context = new AudioContextClass({ latencyHint: 'interactive', sampleRate: 48000 });
     const source = context.createMediaElementSource(player);
     const highpass = context.createBiquadFilter();
     highpass.type = 'highpass';
@@ -463,7 +469,6 @@ async function ensureQqAudioGraph() {
     const bypassGain = context.createGain();
     const weakGain = context.createGain();
     const outputGain = context.createGain();
-    const destination = context.createMediaStreamDestination();
 
     source.connect(bypassGain).connect(outputGain);
     source.connect(stabCompressor);
@@ -471,9 +476,7 @@ async function ensureQqAudioGraph() {
     stabMakeup.connect(stabGain);
     stabGain.connect(outputGain);
     source.connect(highpass).connect(lowpass).connect(mono).connect(compressor).connect(weakGain).connect(outputGain);
-    outputGain.connect(destination);
-    qqOutputPlayer.srcObject = destination.stream;
-    qqAudioGraph = { context, source, highpass, lowpass, mono, compressor, stabCompressor, stabMakeup, stabGain, bypassGain, weakGain, outputGain, destination };
+    qqAudioGraph = { context, source, highpass, lowpass, mono, compressor, stabCompressor, stabMakeup, stabGain, bypassGain, weakGain, outputGain };
     player.volume = 1;
     applyWeakNetworkGraph();
     await context.resume();
@@ -631,27 +634,22 @@ async function setSink(audio, deviceId, errorMessage) {
 }
 
 async function setOutputDevices() {
-  const formalId = $('outputDevice').value || settings.outputDeviceId || '';
-  const monitorId = $('monitorDevice').value || settings.monitorDeviceId || '';
-  const graphReady = await ensureQqAudioGraph();
-  if (!formalId || formalId === 'default') {
-    $('outputStatus').textContent = '未选择虚拟音频输出，请选择 Voicemeeter Input。';
-    return false;
+  {
+    try {
+      InternalAudio.validate(internalSelection());
+      const monitorId = $('monitorDevice').value;
+      const ok = await setSink(monitorPlayer, monitorId, '耳机监听设备不可用。');
+      const previewOk = await setSink(previewPlayer, monitorId, '耳机试听设备不可用。');
+      $('outputStatus').textContent = ok && previewOk ? 'CABLE 输出已选择 · 耳机已绑定 · 人声状态见混音面板' : '耳机连接失败，请检查设备。';
+      return ok && previewOk;
+    } catch (error) { $('outputStatus').textContent = error.message; return false; }
   }
-  if (formalId === monitorId) {
-    $('outputStatus').textContent = '语音与监听选择了同一设备，请将监听改为物理耳机。';
-    return false;
-  }
-  const formalOk = await setSink(graphReady ? qqOutputPlayer : player, formalId, '无法连接“发送到 QQ”的输出设备。');
-  const monitorOk = await setSink(monitorPlayer, monitorId, '无法连接耳机监听输出设备。');
-  await setSink(previewPlayer, monitorId, '无法连接耳机试听输出设备。');
-  $('outputStatus').textContent = `语音输出：${formalOk ? '已连接' : '连接失败'} · 耳机监听：${monitorOk ? '已连接' : '连接失败'}`;
-  return formalOk && monitorOk;
+
 }
 
 function pauseActive(message) {
   player.pause();
-  qqOutputPlayer.pause();
+
   monitorPlayer.pause();
   try { monitorPlayer.currentTime = player.currentTime; } catch { /* media not ready */ }
   window.soundboard.reportPlayback({
@@ -661,7 +659,7 @@ function pauseActive(message) {
     slot: activeSlot,
     track: activeTrack?.name || '',
     currentTime: player.currentTime,
-    sinkId: qqOutputPlayer.sinkId || player.sinkId || '',
+    sinkId: qqAudioGraph?.context.sinkId || settings.cableOutputDeviceId || '',
     monitorSinkId: monitorPlayer.sinkId || ''
   });
   show(message || `已暂停：${activeTrack?.name || '当前音乐'}。再次按键将从当前位置继续。`);
@@ -672,6 +670,7 @@ async function startActive(resume = false) {
   if (!activeTrack?.url) return false;
   const output = await setOutputDevices();
   if (!output) return false;
+  if (!await connectInternalAudio()) return false;
   stopOutputTest();
   ++previewGeneration;
   previewPlayer.pause();
@@ -681,15 +680,14 @@ async function startActive(resume = false) {
   try { monitorPlayer.currentTime = player.currentTime; } catch { /* media will align after loading */ }
 
   const playRequests = [player.play(), monitorPlayer.play()];
-  if (qqAudioGraph) playRequests.push(qqOutputPlayer.play());
-  const [formalResult, monitorResult, qqOutputResult] = await Promise.allSettled(playRequests);
-  if (formalResult.status === 'rejected' || (qqAudioGraph && qqOutputResult?.status === 'rejected')) {
+  const [formalResult, monitorResult] = await Promise.allSettled(playRequests);
+  if (formalResult.status === 'rejected') {
     player.pause();
-    qqOutputPlayer.pause();
+
     monitorPlayer.pause();
-    const reason = formalResult.status === 'rejected' ? formalResult.reason : qqOutputResult.reason;
-    window.soundboard.reportPlayback({ ok: false, action: 'play-error', key: activeKey, slot: activeSlot, track: activeTrack.name, error: String(reason), sinkId: qqOutputPlayer.sinkId || player.sinkId || '' });
-    show('无法将音乐发送到 QQ；请确认 Voicemeeter 正在运行。', true);
+    const reason = formalResult.reason;
+    window.soundboard.reportPlayback({ ok: false, action: 'play-error', key: activeKey, slot: activeSlot, track: activeTrack.name, error: String(reason), sinkId: qqAudioGraph?.context.sinkId || settings.cableOutputDeviceId || '' });
+    show('音乐输出失败，请检查 CABLE 与麦克风连接状态。', true);
     return false;
   }
 
@@ -702,14 +700,16 @@ async function startActive(resume = false) {
     track: activeTrack.name,
     currentTime: player.currentTime,
     volume: settings.musicVolume ?? 0.4,
-    weakNetworkMode: Boolean(settings.weakNetworkMode),
-    sinkId: qqOutputPlayer.sinkId || player.sinkId || '',
+    audioBackend: settings.audioBackend,
+    internalAudio: internalRoute?.diagnostics(),
+    weakNetworkMode: weakEnabled(),
+    sinkId: qqAudioGraph?.context.sinkId || settings.cableOutputDeviceId || '',
     monitorSinkId: monitorPlayer.sinkId || '',
     monitorOk,
     src: player.src
   });
   const prefix = resume ? '已从暂停位置继续' : '正在播放';
-  const weakText = settings.weakNetworkMode ? '，QQ 弱网模式' : '';
+  const weakText = weakEnabled() ? '，QQ 弱网模式' : '';
   show(`${prefix}：${activeTrack.name}（${activeKey} · ${slotAccelerator(activeSlot)}，语音音量 ${Math.round((settings.musicVolume ?? 0.13) * 100)}%${weakText}）${monitorOk ? '；语音设备与耳机同步输出。' : '；语音输出已启动，耳机监听失败。'}`, !monitorOk);
   renderPlaybackStatus();
   return true;
@@ -732,7 +732,7 @@ async function playSlot(key, slot) {
   }
   if (!sameTrack || player.ended || activeFinished) {
     player.pause();
-    qqOutputPlayer.pause();
+
     monitorPlayer.pause();
     ++previewGeneration;
     previewPlayer.pause();
@@ -747,7 +747,7 @@ async function playSlot(key, slot) {
   }
   await startActive(sameTrack && !player.ended);
   } catch (error) {
-    player.pause(); qqOutputPlayer.pause(); monitorPlayer.pause();
+    player.pause(); monitorPlayer.pause();
     show(error.message || '播放失败。', true);
   } finally { playbackBusy = false; }
 }
@@ -771,13 +771,13 @@ async function restartCurrentPlayback() {
   if (!activeTrack || !player.src) return show('当前没有可重播的 BGM，请先选择播放一段音乐。', true);
   playbackBusy = true;
   try {
-    player.pause(); qqOutputPlayer.pause(); monitorPlayer.pause();
+    player.pause(); monitorPlayer.pause();
     player.currentTime = activeRange.start;
     monitorPlayer.currentTime = activeRange.start;
     activeFinished = false;
     await startActive(false);
   } catch (error) {
-    player.pause(); qqOutputPlayer.pause(); monitorPlayer.pause();
+    player.pause(); monitorPlayer.pause();
     show(error.message || '重新播放失败。', true);
   } finally { playbackBusy = false; }
 }
@@ -787,6 +787,7 @@ async function previewTrack(slot, override = null, resumeOverride = false) {
   const track = override || selectedTracks[slot];
   if (!track?.url) return show(`请先为 ${slotAccelerator(slot)} 导入音乐。`, true);
   const monitorId = $('monitorDevice').value || settings.monitorDeviceId || '';
+  if (!audioDevices.some(device => device.kind === 'audiooutput' && device.deviceId === monitorId && !InternalAudio.isAlias(monitorId) && !InternalAudio.isVirtual(device.label))) return show('请先选择真实耳机，再试听音乐。', true);
   if (!await setSink(previewPlayer, monitorId, '无法连接耳机试听输出设备。')) return;
   const resolvedUrl = new URL(track.url, window.location.href).href;
   const samePreview = previewPlayer.src === resolvedUrl && MusicModel.same(previewTrackSnapshot, track);
@@ -849,28 +850,37 @@ async function refreshChampions() {
 async function refreshDevices() {
   try {
     const allDevices = await navigator.mediaDevices.enumerateDevices();
+    audioDevices = allDevices;
+    renderSystemAudioWarning();
     const devices = allDevices.filter(device => device.kind === 'audiooutput');
     const inputs = allDevices.filter(device => device.kind === 'audioinput');
     const formal = $('outputDevice');
     const monitor = $('monitorDevice');
     const calibration = $('calibrationInput');
-    formal.replaceChildren(new Option('系统默认输出', ''));
-    monitor.replaceChildren(new Option('系统默认耳机', ''));
-    calibration.replaceChildren(new Option('自动选择 Voicemeeter B1', ''));
-    for (const device of devices) {
+    formal.replaceChildren(new Option('请选择 CABLE Input', ''));
+    monitor.replaceChildren(new Option('请选择真实耳机', ''));
+    calibration.replaceChildren(new Option('使用所选真实麦克风', ''));
+    for (const device of devices.filter(d => (!InternalAudio.isAlias(d.deviceId) && /^CABLE(?:-[A-D])? Input\b/i.test(d.label)))) {
       const label = device.label || '音频输出设备';
       formal.add(new Option(label, device.deviceId));
-      monitor.add(new Option(label, device.deviceId));
     }
-    for (const device of inputs) {
+    for (const device of MusicModel.physicalDevices(devices).filter(d => !InternalAudio.isAlias(d.deviceId))) monitor.add(new Option(device.label || '音频输出设备', device.deviceId));
+    for (const device of inputs.filter(d => (!InternalAudio.isAlias(d.deviceId) && !InternalAudio.isVirtual(d.label)))) {
       const label = device.label || `音频输入设备 ${calibration.options.length}`;
       calibration.add(new Option(label, device.deviceId));
     }
-    formal.value = settings?.outputDeviceId || '';
+    formal.value = MusicModel.matchDevice(devices.filter(d => /^CABLE(?:-[A-D])? Input\b/i.test(d.label)), settings.cableOutputDeviceId, settings.cableOutputDeviceName)?.deviceId || '';
     monitor.value = settings?.monitorDeviceId || '';
+    if (!monitor.value) monitor.value = MusicModel.matchDevice(devices.filter(d => !InternalAudio.isVirtual(d.label)), settings.monitorDeviceId, settings.headphoneDeviceName)?.deviceId || '';
+    const mic = $('internalMic');
+    mic.replaceChildren(new Option('请选择真实麦克风', ''));
+    for (const device of MusicModel.physicalDevices(inputs).filter(d => !InternalAudio.isAlias(d.deviceId))) mic.add(new Option(device.label, device.deviceId));
+    mic.value = MusicModel.matchDevice(inputs.filter(d => !InternalAudio.isVirtual(d.label)), settings.internalMicDeviceId, settings.internalMicDeviceName)?.deviceId || '';
     calibration.value = inputs.some(device => device.deviceId === settings?.calibrationInputDeviceId)
       ? settings.calibrationInputDeviceId
       : '';
+    calibration.value = mic.value;
+    renderInternalStatus();
     return { outputs: devices, inputs };
   } catch {
     show('浏览器未能读取输出设备列表。', true);
@@ -967,12 +977,10 @@ async function calibrateFixedVolume() {
     if (!player.paused) pauseActive('已暂停音乐，避免影响说话音量校准。');
     previewPlayer.pause();
     // The first short request reveals device labels after the user grants local permission.
-    if (!$('calibrationInput').value) {
-      const probe = await navigator.mediaDevices.getUserMedia({ audio: true });
-      probe.getTracks().forEach(trackItem => trackItem.stop());
-      const refreshed = await refreshDevices();
-      const preferred = refreshed.inputs.find(device => /Voicemeeter Out B1|Voicemeeter Output/i.test(device.label));
-      if (preferred) $('calibrationInput').value = preferred.deviceId;
+    {
+      InternalAudio.validate(internalSelection());
+      $('calibrationInput').value = $('internalMic').value;
+
     }
     const deviceId = $('calibrationInput').value;
     stream = await navigator.mediaDevices.getUserMedia({
@@ -985,7 +993,7 @@ async function calibrateFixedVolume() {
     });
     show('请保持平常 QQ 通话的说话音量，连续说话 5 秒。');
     const [voice, trackRms] = await Promise.all([measureSpeakingRms(stream), analyzeTrackRms(track)]);
-    const currentMicGainDb = Number(settings.micGainDb ?? 2);
+    const currentMicGainDb = 0;
     const desiredGainIncreaseDb = 20 * Math.log10(0.08 / Math.max(voice.rms, 0.001));
     const peakHeadroomDb = 20 * Math.log10(0.75 / Math.max(voice.peak, 0.01));
     const gainIncreaseDb = Math.max(0, Math.min(desiredGainIncreaseDb, peakHeadroomDb));
@@ -997,17 +1005,17 @@ async function calibrateFixedVolume() {
     if (!micResult.ok) throw new Error(`麦克风增益应用失败：${micResult.error || '请用管理员快捷方式重启后重试。'}`);
     const result = await window.soundboard.saveSettings({
       musicVolume: fixedVolume,
-      micGainDb: micResult.micGainDb,
-      calibrationInputDeviceId: deviceId
+      internalMicGainDb: micResult.micGainDb
     });
     if (!result.ok) throw new Error(result.error || '保存音量失败。');
     settings = result.settings;
+    internalRoute?.setGain(settings.internalMicGainDb);
     updateVolumeDisplay(settings.musicVolume);
     applyWeakNetworkGraph();
     monitorPlayer.volume = settings.monitorVolume;
     previewPlayer.volume = settings.monitorVolume;
-    $('calibrationHint').textContent = `固定结果：麦克风增益 ${Number(settings.micGainDb).toFixed(1)} dB，音乐 ${Math.round(settings.musicVolume * 100)}%；以后启动会一直使用。`;
-    show(`校准完成：麦克风 ${Number(settings.micGainDb).toFixed(1)} dB，音乐 ${Math.round(settings.musicVolume * 100)}%。`);
+    renderAudioBackend();
+    show(`校准完成：麦克风 ${Number(settings.internalMicGainDb).toFixed(1)} dB，音乐 ${Math.round(settings.musicVolume * 100)}%。`);
   } catch (error) {
     show(error?.message || '音量校准失败。', true);
   } finally {
@@ -1019,14 +1027,20 @@ async function calibrateFixedVolume() {
 
 async function init() {
   settings = MusicModel.migrate(await window.soundboard.getSettings());
+  if (settings.audioPreview) {
+    document.title = `英雄音乐台 · 混音测试版 ${settings.previewBuild || ''}`;
+    const label = document.querySelector('.tb-title span');
+    label.textContent = '英雄音乐台 · 测试版'; label.title = document.title;
+  }
+  $('wizardBackend').value = settings.audioBackend;
   renderLibraryStatus();
   $('musicLibrary').open = !MusicModel.slots(settings.publicTracks).some(Boolean) && !Object.values(settings.mappings || {}).some(value => MusicModel.slots(value).some(Boolean));
-  $('weakNetworkMode').checked = Boolean(settings.weakNetworkMode);
-  $('loudnessStabilizer').checked = Boolean(settings.loudnessStabilizer);
+  $('weakNetworkMode').checked = weakEnabled();
+  $('loudnessStabilizer').checked = stabilizerEnabled();
   applyModeSwitchState();
   updateVolumeDisplay(settings.musicVolume);
+  renderAudioBackend();
   hotkeyDisplays();
-  $('calibrationHint').textContent = `固定结果：麦克风增益 ${Number(settings.micGainDb).toFixed(1)} dB，音乐 ${Math.round(settings.musicVolume * 100)}%；以后启动会自动恢复。`;
   if (settings.lockfilePath) $('lockfileInfo').textContent = `当前 lockfile：${settings.lockfilePath}`;
   const { outputs: devices } = await refreshDevices();
   await refreshChampions();  // 启动时补齐自动昵称表（Data Dragon 本名），命中后重渲染搜索列表
@@ -1038,24 +1052,6 @@ async function init() {
     }
   }).catch(() => { /* 离线时用上次缓存，无缓存则退化为称号+手工昵称表 */ });
 
-  let outputDeviceId = settings.outputDeviceId || '';
-  let monitorDeviceId = settings.monitorDeviceId || '';
-  const deviceExists = id => !id || devices.some(device => device.deviceId === id);
-  // 监听设备自动回退只在用户已在向导里配置过耳机名时启用。
-  let monitorFallbackId = '';
-  if (settings.headphoneDeviceName) {
-    const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const headphonePattern = new RegExp(escapeRegExp(settings.headphoneDeviceName));
-    monitorFallbackId = devices.find(device => headphonePattern.test(device.label) && !/Voicemeeter/i.test(device.label))?.deviceId || '';
-  }
-  if (!outputDeviceId || !deviceExists(outputDeviceId)) outputDeviceId = devices.find(device => /Voicemeeter Input/i.test(device.label))?.deviceId || '';
-  if (!monitorDeviceId || !deviceExists(monitorDeviceId)) monitorDeviceId = monitorFallbackId;
-  $('outputDevice').value = outputDeviceId;
-  $('monitorDevice').value = monitorDeviceId;
-  if (outputDeviceId !== settings.outputDeviceId || monitorDeviceId !== settings.monitorDeviceId) {
-    const result = await window.soundboard.saveSettings({ outputDeviceId, monitorDeviceId });
-    if (result.ok) settings = result.settings;
-  }
   await setOutputDevices();
   applyMappingView();
 
@@ -1078,21 +1074,16 @@ async function init() {
     $('lcuBadge').textContent = status.text;
     $('lcuBadge').classList.toggle('muted', !status.connected);
   });
-  window.soundboard.onAudioSetupStatus(status => {
-    if (!status.ok) {
-      $('outputStatus').textContent = '音频初始化失败，请点击“重新配置音频”。';
-      show('音频初始化失败，请重新选择耳机和麦克风。', true);
-    }
-  });
   // All listeners are wired; ask the main process to replay the current state
   // in case it was broadcast before we could receive it.
   await window.soundboard.rendererReady();
   maybeShowSetupWizard();
+  document.documentElement.dataset.ready = 'true';
 }
 
 // —— 初次配置向导 ——
 function needsSetup() {
-  return !settings.setupDone || !settings.headphoneDeviceName || !settings.microphoneDeviceName;
+  return !settings.setupDone || !settings.internalMicDeviceName || !settings.cableOutputDeviceId || !settings.monitorDeviceId;
 }
 
 function waitForResult(promise, timeoutMs, message) {
@@ -1100,11 +1091,13 @@ function waitForResult(promise, timeoutMs, message) {
   return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), timeoutMs); })]).finally(() => clearTimeout(timer));
 }
 let wizardOpening = false;
-async function maybeShowSetupWizard(force = false) {
+async function maybeShowSetupWizard(force = false, backend = settings.audioBackend) {
   if ((!force && !needsSetup()) || wizardOpening) return;
   wizardOpening = true;
   $('setupWizard').hidden = false;
-  refreshVmStatus();
+  $('wizardResult').textContent = ''; $('wizardResult').style.color = '';
+  $('wizardBackend').value = backend;
+  renderWizardBackend();
   $('wizardDeviceStatus').textContent = '正在读取设备；麦克风授权等待最多 8 秒。';
   try {
     // Always release a late permission result, even after the visible timeout.
@@ -1123,6 +1116,7 @@ let wizardDeviceLists = { outputs: [], inputs: [] };
 function fillWizardDeviceOptions() {
   const headphone = $('wizardHeadphone');
   const microphone = $('wizardMicrophone');
+  const previousHeadphone = headphone.value, previousMicrophone = microphone.value, previousCable = $('wizardCable').value;
   headphone.replaceChildren(new Option('请选择耳机', ''));
   const outputs = MusicModel.physicalDevices(wizardDeviceLists.outputs);
   outputs.forEach(device => headphone.add(new Option(device.label, device.label)));
@@ -1130,16 +1124,17 @@ function fillWizardDeviceOptions() {
   const inputs = MusicModel.physicalDevices(wizardDeviceLists.inputs);
   inputs.forEach(device => microphone.add(new Option(device.label, device.label)));
   if (settings.headphoneDeviceName) headphone.value = MusicModel.deviceName(settings.headphoneDeviceName);
-  if (settings.microphoneDeviceName) microphone.value = MusicModel.deviceName(settings.microphoneDeviceName);
+  const micName = settings.internalMicDeviceName || settings.microphoneDeviceName;
+  if (micName) microphone.value = MusicModel.deviceName(micName);
+  if (outputs.some(d => d.label === previousHeadphone)) headphone.value = previousHeadphone;
+  if (inputs.some(d => d.label === previousMicrophone)) microphone.value = previousMicrophone;
+  const cable = $('wizardCable');
+  cable.replaceChildren(new Option('请选择 CABLE Input', ''));
+  for (const device of wizardDeviceLists.outputs.filter(d => !InternalAudio.isAlias(d.deviceId) && /^CABLE(?:-[A-D])? Input\b/i.test(d.label))) cable.add(new Option(device.label, device.deviceId));
+  cable.value = [...cable.options].find(d => d.value === settings.cableOutputDeviceId || (d.value && d.text === settings.cableOutputDeviceName))?.value || (cable.options.length === 2 ? cable.options[1].value : '');
+  if ([...cable.options].some(d => d.value === previousCable && previousCable)) cable.value = previousCable;
+  renderWizardBackend();
   $('wizardDeviceStatus').textContent = outputs.length && inputs.length ? '设备已就绪，请选择日常使用的物理耳机和麦克风。' : '设备名称不可用，请检查麦克风权限和连接后刷新。';
-}
-
-async function refreshVmStatus() {
-  const status = await waitForResult(window.soundboard.vmStatus(), 5000, '检测超时').catch(() => ({ installed: false }));
-  $('vmStatusText').textContent = status.installed
-    ? '已检测到 Voicemeeter，可以继续下一步。'
-    : '未检测到 Voicemeeter：点击上方按钮从官网下载安装（免费），完成安装后回到这里。';
-  $('vmInstalled').hidden = status.installed;
 }
 
 player.addEventListener('ended', () => {
@@ -1201,19 +1196,8 @@ window.addEventListener('keydown', event => {
 });
 
 // 向导交互
-$('vmDownload').onclick = async () => {
-  $('vmDownload').disabled = true;
-  $('vmDownloadHint').textContent = '正在从 VB-Audio 官网下载（约 15MB）…';
-  const result = await window.soundboard.vmInstall().catch(error => ({ ok: false, error: String(error) }));
-  $('vmDownload').disabled = false;
-  $('vmDownloadHint').textContent = result.ok
-    ? '官方安装向导已启动：完成安装后点“我已安装完成，重新检测”。'
-    : `下载失败：${result.error || ''}（也可手动访问 vb-audio.com 下载）`;
-  if (result.ok) $('vmInstalled').hidden = false;
-};
-$('vmInstalled').onclick = refreshVmStatus;
 $('reconfigureAudio').onclick = () => maybeShowSetupWizard(true);
-$('wizardDismiss').onclick = () => { if (!$('wizardFinish').disabled) $('setupWizard').hidden = true; };
+$('wizardDismiss').onclick = () => { if (!$('wizardFinish').disabled) { $('setupWizard').hidden = true; renderAudioBackend(); } };
 $('wizardRefreshDevices').onclick = async () => {
   $('wizardDeviceStatus').textContent = '正在刷新设备…';
   try { wizardDeviceLists = await waitForResult(refreshDevices(), 8000, '设备读取超时，请重试。'); fillWizardDeviceOptions(); }
@@ -1229,38 +1213,30 @@ $('wizardFinish').onclick = async () => {
     resultBox.textContent = '请先在②中选择耳机和麦克风。';
     return;
   }
-  $('wizardFinish').disabled = true;
-  $('wizardDismiss').disabled = true;
-  resultBox.style.color = '';
-  resultBox.textContent = '正在写入音频路由（启动 Voicemeeter、设置默认设备、校验增益）…';
-  const started = Date.now();
-  const progress = setInterval(() => { resultBox.textContent = `正在配置音频路由…已等待 ${Math.floor((Date.now() - started) / 1000)} 秒（最多 80 秒，可失败后重试）。`; }, 1000);
-  try {
-    const result = await waitForResult(window.soundboard.wizardComplete({ headphoneDeviceName, microphoneDeviceName }), 80000, '音频配置等待超时，请检查设备与 Voicemeeter 后重试。');
-    clearInterval(progress);
-    if (!result.ok) throw new Error(result.error || '音频配置失败，请重新选择设备。');
-    settings = result.settings;
-    resultBox.textContent = '配置完成，正在更新播放设备…';
-    await waitForResult(refreshDevices(), 8000, '音频路由已配置，但刷新播放设备超时。');
-    const virtual = [...$('outputDevice').options].find(item => /Voicemeeter Input/i.test(item.text));
-    const headphoneName = MusicModel.deviceName(headphoneDeviceName);
-    const monitor = [...$('monitorDevice').options].find(item => item.value && !['default', 'communications'].includes(item.value) && MusicModel.deviceName(item.text) === headphoneName);
-    if (!virtual || !monitor) throw new Error('音频路由已配置，但播放设备尚未就绪；请刷新设备后重试。');
-    const saved = await window.soundboard.saveSettings({ outputDeviceId: virtual.value, monitorDeviceId: monitor.value });
-    if (!saved.ok) throw new Error(saved.error || '保存播放设备失败。');
-    settings = saved.settings;
-    $('outputDevice').value = virtual.value;
-    $('monitorDevice').value = monitor.value;
-    if (!await waitForResult(setOutputDevices(), 8000, '绑定播放设备超时。')) throw new Error('绑定播放设备失败，请重试。');
-    $('setupWizard').hidden = true;
-    show('音频配置完成，已连接虚拟输出与物理耳机。');
-  } catch (error) {
-    resultBox.style.color = '#b42335';
-    resultBox.textContent = `配置失败：${error.message || String(error)}`;
-  } finally {
-    clearInterval(progress);
-    $('wizardFinish').disabled = false;
-    $('wizardDismiss').disabled = false;
+  if ($('wizardBackend').value === 'internal') {
+    const findPhysical = (list, name) => MusicModel.physicalDevices(list).find(d => d.label === MusicModel.deviceName(name) && !InternalAudio.isAlias(d.deviceId));
+    const mic = findPhysical(wizardDeviceLists.inputs, microphoneDeviceName);
+    const monitor = findPhysical(wizardDeviceLists.outputs, headphoneDeviceName);
+    const cable = wizardDeviceLists.outputs.find(d => d.deviceId === $('wizardCable').value);
+    try { InternalAudio.validate({ mic, monitor, cable }); }
+    catch (error) { resultBox.textContent = error.message; resultBox.style.color = '#b42335'; return; }
+    $('wizardFinish').disabled = true; $('wizardDismiss').disabled = true; $('wizardBackend').disabled = true;
+    pauseActive(); cancelInternalAudio();
+    try {
+      resultBox.textContent = '正在保存所选设备并连接麦克风；Windows 默认设备保持不变…';
+      const result = await waitForResult(window.soundboard.wizardComplete({ audioBackend: 'internal', headphoneDeviceName, microphoneDeviceName, internalMicDeviceId: mic.deviceId, monitorDeviceId: monitor.deviceId, cableOutputDeviceId: cable.deviceId, cableOutputDeviceName: cable.label }), 40000, '保存设备超时，请重试。');
+      if (!result.ok) throw Error(result.error || '保存音频方案失败。');
+      settings = MusicModel.migrate(result.settings);
+      await waitForResult(refreshDevices(), 8000, '读取设备超时。');
+      renderAudioBackend();
+      if (!await connectInternalAudio()) throw Error($('internalAudioStatus').textContent || '连接音频失败。');
+      const ready = await window.soundboard.saveSettings({ setupDone: true });
+      if (!ready.ok) throw Error(ready.error || '保存完成状态失败。');
+      settings = ready.settings; $('setupWizard').hidden = true;
+      show('内部混音已连接。QQ 麦克风选 CABLE Output、扬声器选真实耳机；Windows 默认设备未改动。');
+    } catch (error) { cancelInternalAudio(); renderInternalStatus(error.message, true); resultBox.textContent = `配置失败：${error.message}`; resultBox.style.color = '#b42335'; }
+    finally { $('wizardFinish').disabled = false; $('wizardDismiss').disabled = false; $('wizardBackend').disabled = false; }
+    return;
   }
 };
 $('refreshChampions').onclick = refreshChampions;
@@ -1356,14 +1332,9 @@ $('musicVolume').onchange = async () => {
     show(`音乐音量已固定为 ${Math.round(settings.musicVolume * 100)}%。`);
   } else show(result.error, true);
 };
-$('calibrationInput').onchange = async () => {
-  const result = await window.soundboard.saveSettings({ calibrationInputDeviceId: $('calibrationInput').value });
-  if (result.ok) settings = result.settings;
-  else show(result.error, true);
-};
-$('calibrateVolume').onclick = calibrateFixedVolume;
+$('calibrationInput').disabled = true;
 $('outputDevice').onchange = async () => {
-  const result = await window.soundboard.saveSettings({ outputDeviceId: $('outputDevice').value });
+  const result = await window.soundboard.saveSettings({ cableOutputDeviceId: $('outputDevice').value, cableOutputDeviceName: $('outputDevice').selectedOptions[0]?.text || '' });
   if (result.ok) { settings = result.settings; await setOutputDevices(); show('QQ 音乐输出设备已保存。'); }
   else show(result.error, true);
 };
@@ -1385,13 +1356,14 @@ $('weakNetworkMode').onchange = async () => {
   // 互斥：开启弱网模式时自动停用响度稳定器
   const extra = weakNetworkMode && $('loudnessStabilizer').checked ? { loudnessStabilizer: false } : {};
   if (extra.loudnessStabilizer === false) $('loudnessStabilizer').checked = false;
-  const result = await window.soundboard.saveSettings({ weakNetworkMode, ...extra });
+  const changes = { internalWeakNetworkMode: weakNetworkMode, ...(extra.loudnessStabilizer === false ? { internalLoudnessStabilizer: false } : {}) };
+  const result = await window.soundboard.saveSettings(changes);
   if (result.ok) {
     settings = result.settings;
     applyWeakNetworkGraph();
     applyModeSwitchState();
     show(weakNetworkMode
-      ? 'QQ 弱网模式已开启：仅优化送入 B1 的音乐，耳机监听保持原音（响度稳定器已停用）。'
+      ? 'QQ 弱网模式已开启：仅处理发送的 BGM，耳机监听和人声不受影响；不能修复网络丢包。'
       : 'QQ 弱网模式已关闭：发送到 QQ 的音乐恢复原始频段和声道。');
   } else {
     $('weakNetworkMode').checked = !weakNetworkMode;
@@ -1403,7 +1375,8 @@ $('loudnessStabilizer').onchange = async () => {
   // 互斥：开启响度稳定器时自动停用弱网模式
   const extra = loudnessStabilizer && $('weakNetworkMode').checked ? { weakNetworkMode: false } : {};
   if (extra.weakNetworkMode === false) $('weakNetworkMode').checked = false;
-  const result = await window.soundboard.saveSettings({ loudnessStabilizer, ...extra });
+  const changes = { internalLoudnessStabilizer: loudnessStabilizer, ...(extra.weakNetworkMode === false ? { internalWeakNetworkMode: false } : {}) };
+  const result = await window.soundboard.saveSettings(changes);
   if (result.ok) {
     settings = result.settings;
     applyWeakNetworkGraph();
@@ -1415,14 +1388,6 @@ $('loudnessStabilizer').onchange = async () => {
     $('loudnessStabilizer').checked = !loudnessStabilizer;
     show(result.error, true);
   }
-};
-$('useVoicemeeter').onclick = async () => {
-  const option = [...$('outputDevice').options].find(item => /Voicemeeter Input/i.test(item.text));
-  if (!option) return show('未找到 Voicemeeter Input。请先点“刷新设备”，确认 Voicemeeter 已启动。', true);
-  $('outputDevice').value = option.value;
-  const result = await window.soundboard.saveSettings({ outputDeviceId: option.value });
-  if (result.ok) { settings = result.settings; await setOutputDevices(); show('英雄音乐会发送到 Voicemeeter B1，同时由物理耳机监听。'); }
-  else show(result.error, true);
 };
 $('chooseLockfile').onclick = async () => {
   const file = await window.soundboard.chooseLockfile();
@@ -1475,6 +1440,7 @@ $('monitorVolume').onchange = async () => {
 };
 let outputTest = null;
 function stopOutputTest() {
+  if (internalTestTone) { const tone = internalTestTone; internalTestTone = null; try { tone.stop(); } catch {} }
   if (outputTest) { outputTest.pause(); outputTest.removeAttribute('src'); outputTest.load(); outputTest = null; }
 }
 async function testOutput(virtual) {
@@ -1482,7 +1448,20 @@ async function testOutput(virtual) {
   if (!player.paused) pauseActive('已暂停音乐，开始输出测试。');
   previewPlayer.pause();
   const id = virtual ? $('outputDevice').value : $('monitorDevice').value;
-  if (virtual && (!id || id === 'default')) return show('请先选择 Voicemeeter Input 虚拟输出设备。', true);
+  if (virtual) {
+    if (!await setOutputDevices() || !await connectInternalAudio()) return;
+    // Tone joins the same protected mix as BGM; it never enters the monitor.
+    const context = qqAudioGraph.context, oscillator = context.createOscillator(), gain = context.createGain();
+    oscillator.frequency.value = 997; gain.gain.value = 0;
+    gain.gain.setTargetAtTime(Math.min(0.08, settings.musicVolume || 0), context.currentTime, 0.01);
+    gain.gain.setTargetAtTime(0, context.currentTime + 0.8, 0.02);
+    oscillator.connect(gain).connect(internalRoute.mix); oscillator.start(); oscillator.stop(context.currentTime + 1);
+    internalTestTone = oscillator;
+    oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); if (internalTestTone === oscillator) { internalTestTone = null; $('outputStatus').textContent = '混合输出测试完成，麦克风仍在传输。'; } };
+    $('outputStatus').textContent = '短测试音已发送到 CABLE Output，请让 QQ 对方确认；不回听到耳机。';
+    return;
+  }
+  if (!audioDevices.some(d => d.kind === 'audiooutput' && d.deviceId === id && !InternalAudio.isAlias(id) && !InternalAudio.isVirtual(d.label))) return show('请先选择真实耳机。', true);
   const audio = document.createElement('audio');
   outputTest = audio;
   audio.src = settings.testTrackUrl;
@@ -1512,9 +1491,103 @@ window.addEventListener('keydown', event => {
   }
 });
 navigator.mediaDevices.addEventListener('devicechange', async () => {
-  if (!player.paused) pauseActive('音频设备发生变化，已暂停。请检查输出设备后继续播放。');
-  await refreshDevices();
-  await setOutputDevices();
+  {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const selected = internalRoute?.running ? internalRoute.devices : internalPendingDevices;
+    if (selected && ['mic', 'cable', 'monitor'].some(k => !devices.some(d => d.deviceId === selected[k].deviceId))) {
+      pauseActive(); stopOutputTest(); cancelInternalAudio();
+      await refreshDevices(); renderInternalStatus('所选设备已断开，已停止混音；检查设备后重新连接。', true); return;
+    }
+    await refreshDevices(); return;
+  }
+
 });
+
+function internalSelection() {
+  const find = id => audioDevices.find(d => d.deviceId === $(id).value);
+  return { mic: find('internalMic'), cable: find('outputDevice'), monitor: find('monitorDevice') };
+}
+function renderInternalStatus(message, error = false) {
+  const running = Boolean(internalRoute?.running);
+  $('internalAudioStatus').textContent = message || (internalConnecting ? '正在连接…' : running ? (internalRoute.muted ? '人声已静音 · BGM 继续发送' : '人声持续传输 · 暂停 BGM 不影响说话') : '尚未采集麦克风 · 播放键也可开启连接');
+  $('internalAudioStatus').classList.toggle('audio-error', error);
+  $('connectInternal').disabled = internalConnecting || running;
+  $('disconnectInternal').disabled = !running && !internalConnecting;
+  $('muteInternal').disabled = !running;
+  $('muteInternal').textContent = internalRoute?.muted ? '取消麦克风静音' : '麦克风静音';
+  if (!running) $('internalAudioHint').textContent = 'QQ 麦克风选 CABLE Output，扬声器选真实耳机。暂停音乐不停止人声；退出应用或断开后，QQ 需切回真实麦克风。使用耳机，避免手机测试或扬声器造成回声。';
+  for (const id of ['internalMic', 'outputDevice', 'monitorDevice', 'authorizeAudio', 'refreshDevices']) $(id).disabled = (running || internalConnecting);
+}
+function renderAudioBackend() {
+  $('audioBackend').value = settings.audioBackend;
+  $('internalAudioPanel').hidden = false; $('internalExitHint').hidden = false;
+  $('audioBackendHint').textContent = 'LBGM 混合真实麦克风与 BGM → CABLE；耳机只听 BGM。不更改 Windows 默认设备，启动时不自动采集，连接后最小化仍继续传输。';
+  $('internalMicGain').value = settings.internalMicGainDb ?? 0;
+  $('internalMicGainValue').textContent = `${settings.internalMicGainDb ?? 0} dB`;
+  $('weakNetworkMode').checked = weakEnabled(); $('loudnessStabilizer').checked = stabilizerEnabled(); applyModeSwitchState();
+  $('calibrationHint').textContent = `固定结果：人声增益 ${Number(settings.internalMicGainDb).toFixed(1)} dB，音乐 ${Math.round(settings.musicVolume * 100)}%。仅主动校准时更新。`;
+  renderInternalStatus();
+  renderSystemAudioWarning();
+}
+function renderSystemAudioWarning() {
+  $('systemAudioWarning').hidden = !audioDevices.some(d => d.kind === 'audiooutput' && ['default', 'communications'].includes(d.deviceId) && InternalAudio.isVirtual(MusicModel.deviceName(d.label)));
+}
+async function connectInternalAudio() {
+  if (internalConnecting) { show('正在连接麦克风，请稍候再播放。'); return false; }
+  try { InternalAudio.validate(internalSelection()); } catch (error) { renderInternalStatus(error.message, true); show(error.message, true); return false; }
+  if (internalRoute?.running) return true;
+  const ticket = ++internalConnectionTicket;
+  const selected = internalSelection();
+  const current = () => ticket === internalConnectionTicket;
+  internalConnecting = true; internalPendingDevices = selected; renderInternalStatus();
+  try {
+    if (!await setOutputDevices()) throw Error($('outputStatus').textContent);
+    if (!current()) return false;
+    if (!await ensureQqAudioGraph()) throw Error('无法建立音乐混音引擎。');
+    if (!current()) return false;
+
+    if (!internalRoute) internalRoute = new InternalAudio.Route(qqAudioGraph.context, qqAudioGraph.outputGain, message => { cancelInternalAudio(); pauseActive(); stopOutputTest(); renderInternalStatus(message, true); show(message, true); });
+    internalRoute.setGain(settings.internalMicGainDb ?? 0);
+    const connected = await waitForResult(internalRoute.connect(selected), 12000, '连接超时，请检查麦克风权限、CABLE 和设备占用。');
+    if (!current() || !connected || !internalRoute.running) return false;
+    const generation = internalRoute.generation;
+    const saved = await window.soundboard.saveSettings({ internalMicDeviceId: selected.mic.deviceId, internalMicDeviceName: selected.mic.label, cableOutputDeviceId: selected.cable.deviceId, cableOutputDeviceName: selected.cable.label, monitorDeviceId: selected.monitor.deviceId });
+    if (!current() || !internalRoute.running || internalRoute.generation !== generation) return false;
+    if (!saved.ok) throw Error(saved.error || '保存设备失败。'); settings = saved.settings;
+    return true;
+  } catch (error) { if (current()) { internalRoute?.stop(); renderInternalStatus(error.message, true); show(error.message, true); } return false; }
+  finally { if (ticket === internalConnectionTicket) { internalConnecting = false; internalPendingDevices = null; const message = $('internalAudioStatus').classList.contains('audio-error') ? $('internalAudioStatus').textContent : ''; renderInternalStatus(message, Boolean(message)); } }
+}
+function cancelInternalAudio() {
+  ++internalConnectionTicket; internalConnecting = false; internalPendingDevices = null; internalRoute?.stop();
+}
+function renderWizardBackend() {
+  const internal = $('wizardBackend').value === 'internal';
+ $('wizardCableStep').hidden = !internal; $('wizardCableRow').hidden = !internal;
+  $('wizardCableStatus').textContent = wizardDeviceLists.outputs.some(d => /^CABLE(?:-[A-D])? Input\b/i.test(d.label)) && wizardDeviceLists.inputs.some(d => /^CABLE(?:-[A-D])? Output\b/i.test(d.label)) ? '已检测到 CABLE Input / Output。' : '尚未检测到完整的 VB-CABLE 输入与输出，请安装、重启后刷新。';
+  $('wizardSetupHint').textContent = '保存设备并启动内部混音。不更改 Windows 默认设备。QQ 麦克风手动选 CABLE Output，扬声器选真实耳机。';
+}
+let internalTestTone = null;
+$('connectInternal').onclick = () => connectInternalAudio();
+$('disconnectInternal').onclick = () => { pauseActive(); stopOutputTest(); cancelInternalAudio(); renderInternalStatus('已断开。QQ 请切回真实麦克风；重新播放或点击连接可以恢复。'); };
+$('muteInternal').onclick = () => { if (internalRoute?.running) internalRoute.setMuted(!internalRoute.muted); renderInternalStatus(); };
+$('internalMic').onchange = async () => { const selected = internalSelection().mic; if (!selected) return; const saved = await window.soundboard.saveSettings({ internalMicDeviceId: selected.deviceId, internalMicDeviceName: selected.label }); if (saved.ok) { settings = saved.settings; $('calibrationInput').value = selected.deviceId; } };
+$('internalMicGain').oninput = () => { const gain = Number($('internalMicGain').value); settings.internalMicGainDb = gain; internalRoute?.setGain(gain); $('internalMicGainValue').textContent = `${gain} dB`; };
+$('internalMicGain').onchange = async () => { const saved = await window.soundboard.saveSettings({ internalMicGainDb: settings.internalMicGainDb }); if (saved.ok) { settings = saved.settings; renderAudioBackend(); } else show(saved.error, true); };
+$('authorizeAudio').onclick = async () => { try { const permission = navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => stream.getTracks().forEach(t => t.stop())); await waitForResult(permission, 8000, '授权等待超时，请检查 Windows 麦克风隐私设置。'); await refreshDevices(); } catch (error) { renderInternalStatus(error.message, true); } };
+$('audioBackend').onchange = () => maybeShowSetupWizard(true, $('audioBackend').value);
+$('changeAudioBackend').onclick = () => maybeShowSetupWizard(true, $('audioBackend').value);
+
+$('cableDownload').onclick = () => window.soundboard.cableHelp();
+$('openWindowsSound').onclick = () => window.soundboard.openWindowsSound();
+setInterval(() => {
+  const levels = internalRoute?.running ? internalRoute.levels() : { mic: 0, music: 0, mix: 0 };
+  $('internalMicMeter').value = levels.mic; $('internalMusicMeter').value = levels.music; $('internalMixMeter').value = levels.mix;
+  if (internalRoute?.running) {
+    const diagnostics = internalRoute.diagnostics(levels);
+    $('internalAudioHint').textContent = levels.mic >= 0.95 || levels.music >= 0.95 ? '某一路接近满幅，请调低对应增益或音量，避免失真。' : `${diagnostics.sampleRate} Hz · 本地基础/输出缓冲 ${diagnostics.baseLatencyMs.toFixed(1)}/${diagnostics.outputLatencyMs.toFixed(1)} ms（非 QQ 端到端延迟）。QQ 输入 CABLE Output、输出真实耳机。暂停 BGM 不停止人声；退出后需切回真实麦克风。`;
+  }
+}, 250);
+window.addEventListener('beforeunload', () => { cancelInternalAudio(); stopOutputTest(); });
 
 init().catch(error => show(`初始化失败：${error.message}`, true));
